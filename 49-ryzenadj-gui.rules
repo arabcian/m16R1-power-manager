@@ -1,0 +1,37 @@
+// RyzenAdj GUI — Polkit Kuralı
+// ════════════════════════════════════════════════════════════════════════
+//
+// Bu dosya /etc/polkit-1/rules.d/ altına kurulur ve gerçek JavaScript
+// kural formatındadır (polkit.addRule) — önceki bir sürümde buraya
+// yanlışlıkla bir .policy XML'i konmuştu, bu da polkit'in dosyayı
+// syntax hatasıyla reddetmesine yol açardı.
+//
+// Amaç: com.ryzenadj.gui.set-params action'ını (yalnızca
+// /usr/local/lib/ryzenadj-gui/root_helper.py'yi pkexec ile çalıştırmak
+// için kullanılır — bkz. com.ryzenadj.gui.policy'deki
+// org.freedesktop.policykit.exec.path eşleşmesi) admin grubundaki
+// (wheel/sudo) yerel, aktif oturumlar için TAMAMEN parolasız onaylamak.
+//
+// Bunun güvenli olmasının nedeni root_helper.py'nin kendisi:
+//   - root:root sahipli ve 0700 izinli (kullanıcı okuyup değiştiremez),
+//   - sabit bir allowlist (OPERATIONS dict) dışında hiçbir şey çalıştırmaz,
+//   - her operasyonda path-traversal / isim / boyut doğrulaması yapar.
+// Yani bu kural "her şeye kök erişimi" değil, yalnızca bu tek, denetimli
+// yardımcı programa parolasız erişim veriyor.
+//
+// Grup adını dağıtımınıza göre ayarlayın: Gentoo/Arch'ta "wheel",
+// Debian/Ubuntu'da genelde "sudo" kullanılır — aşağıda ikisi de kontrol
+// ediliyor.
+//
+// Bunu istemiyorsanız (her seferinde ya da kısa bir süre için parola
+// sorulmasını tercih ediyorsanız): bu dosyayı silin ya da içeriğini
+// yorum satırına alın. O zaman yetkilendirme com.ryzenadj.gui.policy
+// içindeki <allow_active>auth_admin_keep</allow_active> değerine düşer.
+
+polkit.addRule(function(action, subject) {
+    if (action.id == "com.ryzenadj.gui.set-params" &&
+        subject.active && subject.local &&
+        (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});

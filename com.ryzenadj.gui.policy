@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+
+  <!--
+    RyzenAdj GUI - Polkit Action Dosyası
+    ════════════════════════════════════════════════════════════════════════════
+
+    Bu dosya, pkexec'in /usr/local/lib/ryzenadj-gui/root_helper.py
+    çalıştırılışını varsayılan org.freedesktop.policykit.exec yerine
+    bu özel action ile eşleştirmesini sağlar.
+
+    NOT (düzeltme): Bu dosyada daha önce <allow_active> için
+    "auth_admin_keep_always" değeri kullanılıyordu. Bu, GEÇERSİZ bir
+    polkit implicit-authorization değeridir — polkit şemasının izin
+    verdiği tek değerler: no, yes, auth_self, auth_self_keep, auth_admin,
+    auth_admin_keep'tir ("_always" eki yoktur). Geçersiz bir değer,
+    polkit'in bu action'ı reddetmesine/yok saymasına yol açabilir; bu da
+    pkexec'in varsayılan org.freedesktop.policykit.exec action'ına
+    düşmesine (ki bu her seferinde parola ister, önbellek YOKTUR) ve
+    kullanıcının HER güç modu değişiminde parola girmesi zorunda
+    kalmasına neden olur — tam olarak yaşanan sorun buydu.
+
+    Artık geçerli olan "auth_admin_keep" kullanılıyor (kısa süreli
+    önbellek, polkit'in kendi ayarına göre tipik olarak birkaç dakika).
+    TAMAMEN parolasız çalışma için (kullanıcı bunu istiyorsa), asıl
+    yetkilendirme artık /etc/polkit-1/rules.d/49-ryzenadj-gui.rules
+    dosyasındaki JavaScript kuralından geliyor — bkz. o dosya. Aşağıdaki
+    <defaults> bloğu yalnızca o kural bir nedenle devrede değilse devreye
+    giren GÜVENLİ bir yedek (fallback) değerdir.
+
+    root_helper.py root:root sahipli ve 0700 izinli olduğu için, kullanıcı
+    içeriğini değiştiremez - bu yüzden parolasız (rules.d) veya kısa
+    önbellekli (auth_admin_keep) yetkilendirme güvenle tanımlanabilir.
+
+    KURULUM: bkz. install.sh (hem bu .policy hem de .rules dosyasını
+    doğru yerlere kurar).
+
+    DOĞRULAMA:
+    ──────────
+    $ echo '{"op":"reload_alienware_wmi","force_gmode":false}' | \
+        pkexec /usr/local/lib/ryzenadj-gui/root_helper.py
+      -> rules.d kuralı devredeyse hiç parola sormamalı.
+  -->
+
+  <action id="com.ryzenadj.gui.set-params">
+    <description>Set GPU/CPU Power Parameters via ryzenadj-gui root helper</description>
+    <description xml:lang="tr">RyzenAdj GUI root yardımcısı ile GPU/CPU Güç Parametrelerini Ayarla</description>
+    <message>System Administrator Authentication Required (RyzenAdj GUI)</message>
+    <message xml:lang="tr">Sistem Administrator Yetkilendirmesi Gereklidir (RyzenAdj GUI)</message>
+
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <!-- Geçerli fallback değer. Parolasız kullanım için asıl
+           yetkilendirme 49-ryzenadj-gui.rules'tan gelir. -->
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+
+    <!--
+      KRITIK: Bu annotation olmadan bu action hicbir zaman devreye
+      girmez - pkexec varsayilan org.freedesktop.policykit.exec'e
+      duser ve her seferinde sifre sorar. Bu annotation, pkexec'in
+      hangi PROGRAM'i calistirdigini bu action'a baglar.
+    -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/ryzenadj-gui/root_helper.py</annotate>
+  </action>
+
+</policyconfig>

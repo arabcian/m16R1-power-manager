@@ -1,0 +1,127 @@
+{
+  "stapm_limit_mw": 100000,
+  "fast_limit_mw": 115000,
+  "slow_limit_mw": 108000,
+  "tctl_temp_c": 89,
+  "vrm_current_ma": 120000,
+  "fan_boost_1": 0,
+  "fan_boost_2": 0,
+  "fan_boost_3": 0,
+  "fan_boost_4": 0,
+  "coall": null,
+  "cores": [
+    {
+      "id": 0,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 0,
+      "coper": -22
+    },
+    {
+      "id": 1,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 1,
+      "coper": -28
+    },
+    {
+      "id": 2,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 2,
+      "coper": -28
+    },
+    {
+      "id": 3,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 3,
+      "coper": -28
+    },
+    {
+      "id": 4,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 4,
+      "coper": -35
+    },
+    {
+      "id": 5,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 5,
+      "coper": -35
+    },
+    {
+      "id": 6,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 6,
+      "coper": -33
+    },
+    {
+      "id": 7,
+      "ccd": 0,
+      "ccx": 0,
+      "core": 7,
+      "coper": -31
+    },
+    {
+      "id": 8,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 0,
+      "coper": -33
+    },
+    {
+      "id": 9,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 1,
+      "coper": -33
+    },
+    {
+      "id": 10,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 2,
+      "coper": -28
+    },
+    {
+      "id": 11,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 3,
+      "coper": -25
+    },
+    {
+      "id": 12,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 4,
+      "coper": -28
+    },
+    {
+      "id": 13,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 5,
+      "coper": -33
+    },
+    {
+      "id": 14,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 6,
+      "coper": -25
+    },
+    {
+      "id": 15,
+      "ccd": 1,
+      "ccx": 0,
+      "core": 7,
+      "coper": -33
+    }
+  ],
+  "extra": {}
+}
