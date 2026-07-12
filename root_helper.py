@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 import tempfile
-import shutil
 from pathlib import Path as _Path
 
 # Only ever add this process's own install directory to sys.path — never
@@ -256,13 +255,15 @@ def _write_tunable(kind: str, path: str, value) -> tuple:
         return False, "unsafe path/value, skipped"
     try:
         if kind == "sysctl":
-            try:
-                sysctl_path = require_tool("sysctl", root_context=True)
-            except FileNotFoundError as e:
-                return False, str(e)
-            result = subprocess.run([sysctl_path, "-w", f"{path}={value}"], capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return False, (result.stderr or "sysctl failed").strip()
+            # D11: helper already runs as root, so write the tunable straight to
+            # /proc/sys/<key-with-slashes> instead of spawning a sysctl process.
+            # The whitelist above still gates path/value; reject traversal.
+            rel = path.replace(".", "/")
+            if ".." in rel.split("/") or rel.startswith("/"):
+                return False, "unsafe sysctl key, skipped"
+            proc_path = "/proc/sys/" + rel
+            with open(proc_path, "w") as f:
+                f.write(value)
             return True, ""
         else:  # file
             with open(path, "w") as f:

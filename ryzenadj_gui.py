@@ -13,9 +13,11 @@ import tempfile
 import subprocess
 import threading
 import glob
+import shlex
+from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QProcess, QPointF, QProcessEnvironment, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QProcess, QPointF, QSize
 from PySide6.QtGui import QFont, QTextCursor, QColor, QPainter, QBrush, QKeyEvent, QPen, QPainterPath, QIcon
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -76,8 +78,8 @@ def _check_not_root():
 ║  [Copy from the Polkit rule file]                                 ║
 ║  EOF                                                              ║
 ║  $ sudo rc-service polkit restart                                 ║
-║    (systemd yoksa / OpenRC kullanıyorsanız; systemd sistemlerde    ║
-║     bunun yerine: sudo systemctl restart polkit)                  ║
+║    (no systemd / on OpenRC systems; on systemd systems use        ║
+║     instead: sudo systemctl restart polkit)                       ║
 ║                                                                   ║
 ║  For more info: see UYGULAMA_DOKUMANTASYONU_TR.md                 ║
 ║                                                                   ║
@@ -1340,7 +1342,12 @@ class RyzenAdjGUI(QMainWindow):
         self._co_live_handles: dict = {}          # {path: file_obj}
         self._co_live_core_prev: dict = {}        # {epath: (joules, monotonic)}
         self._co_live_socket_prev = None          # (joules, monotonic)
-        self._co_live_socket_buf: list = []       # rolling 10-sample watt buffer
+        self._co_live_socket_buf = deque(maxlen=10)   # D6: rolling 10-sample watt buffer
+        # D3: last (text, style-color) cache per CO Live label, keyed by id(widget)
+        self._co_live_text_cache: dict = {}
+        self._co_live_style_cache: dict = {}
+        # D5: cached "█" advance width for the bar font (invalidated on resize)
+        self._co_bar_char_w = 0
         self.gpu_info_timer = None
         self.root_process = None
         self.root_output = ""
@@ -2848,7 +2855,7 @@ except Exception as e:
         prow = QHBoxLayout()
         prow.setSpacing(10)
         prow.setContentsMargins(0, 1, 0, 1)
-        self._co_pwr_cur = SL("—", color=C_GREEN, size=8, bold=True)
+        self._co_pwr_cur = SL("—", color=C_CYAN, size=8, bold=True)
         self._co_pwr_avg = SL("avg: —", color=C_DGREY, size=8)
         prow.addWidget(self._co_pwr_cur)
         prow.addWidget(self._co_pwr_avg)
@@ -3166,6 +3173,7 @@ except Exception as e:
         extra_paths = [
             '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor',
             '/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference',
+            '/sys/devices/system/cpu/cpufreq/boost',   # D4
         ]
 
         # ── Open all files ─────────────────────────────────────────
@@ -3201,6 +3209,25 @@ except Exception as e:
             self._co_live_handles[path] = None
             return None
 
+    def resizeEvent(self, event):
+        # D5: drop the cached "█" advance so it is re-metricked once after a resize
+        self._co_bar_char_w = 0
+        super().resizeEvent(event)
+
+    def _co_set_text(self, lbl, text):
+        """D3: setText only when the text actually changed for this label."""
+        wid = id(lbl)
+        if self._co_live_text_cache.get(wid) != text:
+            self._co_live_text_cache[wid] = text
+            lbl.setText(text)
+
+    def _co_set_color(self, lbl, color):
+        """D3: setStyleSheet('color:...') only when the color changed."""
+        wid = id(lbl)
+        if self._co_live_style_cache.get(wid) != color:
+            self._co_live_style_cache[wid] = color
+            lbl.setStyleSheet(f"color:{color};")
+
     def _update_co_live(self):
         """1-second CO Live Telemetry update — pure sysfs seek(), no subprocess."""
         if not self.isVisible():
@@ -3215,16 +3242,16 @@ except Exception as e:
                 continue
             raw = self._co_live_read(path)
             if raw is None:
-                v_lbl.setText("—")
+                self._co_set_text(v_lbl, "—")
                 continue
             try:
                 temp = int(raw) / 1000.0
             except ValueError:
-                v_lbl.setText("—")
+                self._co_set_text(v_lbl, "—")
                 continue
             color = C_CYAN if temp < 70 else (C_YELLOW if temp < 85 else C_STOP)
-            v_lbl.setText(f"{temp:.1f} °C")
-            v_lbl.setStyleSheet(f"color:{color};")
+            self._co_set_text(v_lbl, f"{temp:.1f} °C")
+            self._co_set_color(v_lbl, color)
 
         # ── Socket Power (zenergy Esocket0) ──────────────────────────
         socket_watt = 0.0
@@ -3244,13 +3271,11 @@ except Exception as e:
                     pass
 
         self._co_live_socket_buf.append(socket_watt)
-        if len(self._co_live_socket_buf) > 10:
-            self._co_live_socket_buf.pop(0)
         avg_w = (sum(self._co_live_socket_buf) / len(self._co_live_socket_buf)
                  if self._co_live_socket_buf else 0.0)
         if socket_watt > 0 or avg_w > 0:
-            self._co_pwr_cur.setText(f"{socket_watt:.1f} W")
-            self._co_pwr_avg.setText(f"avg: {avg_w:.1f} W")
+            self._co_set_text(self._co_pwr_cur, f"{socket_watt:.1f} W")
+            self._co_set_text(self._co_pwr_avg, f"avg: {avg_w:.1f} W")
 
         # ── Per-Core Power (zenergy Ecore*) ──────────────────────────
         # dict keyed by Ecore index order; matched up against the topology order
@@ -3291,35 +3316,35 @@ except Exception as e:
             t1 = freq_map.get(threads[1], 0) if len(threads) > 1 else 0
             t0_col = C_CYAN   if t0 > 400 else C_VDGREY
             t1_col = C_DGREY  if t1 > 400 else C_VDGREY
-            lbl_t0.setText(f"{t0:4d}")
-            lbl_t0.setStyleSheet(f"color:{t0_col};")
-            lbl_t1.setText(f"{t1:4d}")
-            lbl_t1.setStyleSheet(f"color:{t1_col};")
+            self._co_set_text(lbl_t0, f"{t0:4d}")
+            self._co_set_color(lbl_t0, t0_col)
+            self._co_set_text(lbl_t1, f"{t1:4d}")
+            self._co_set_color(lbl_t1, t1_col)
 
             # Ecore[i*2] and Ecore[i*2+1] are the two threads of the same physical core
             # → same MSR value; use the even index
             pwr = core_watts.get(i * 2)
             if pwr is not None:
                 pcol = C_BLUE if pwr < 3 else (C_YELLOW if pwr < 8 else C_ORANGE)
-                lbl_pwr.setText(f"{pwr:4.1f}W")
-                lbl_pwr.setStyleSheet(f"color:{pcol};")
-                # Dynamically compute the bar length based on the label width
-                char_w = lbl_bar.fontMetrics().horizontalAdvance("█")
+                self._co_set_text(lbl_pwr, f"{pwr:4.1f}W")
+                self._co_set_color(lbl_pwr, pcol)
+                # D5: "█" advance width is font-invariant; compute once, cache
+                char_w = self._co_bar_char_w
+                if char_w <= 0:
+                    char_w = lbl_bar.fontMetrics().horizontalAdvance("█")
+                    self._co_bar_char_w = char_w
                 n_chars = max(8, lbl_bar.width() // char_w) if char_w > 0 else 8
                 filled = min(n_chars, int(pwr / 15.0 * n_chars))
-                lbl_bar.setText("█" * filled + "░" * (n_chars - filled))
-                lbl_bar.setStyleSheet(f"color:{pcol};")
+                self._co_set_text(lbl_bar, "█" * filled + "░" * (n_chars - filled))
+                self._co_set_color(lbl_bar, pcol)
             else:
-                lbl_pwr.setText("  —  ")
-                lbl_pwr.setStyleSheet(f"color:{C_VDGREY};")
-                lbl_bar.setText("")
+                self._co_set_text(lbl_pwr, "  —  ")
+                self._co_set_color(lbl_pwr, C_VDGREY)
+                self._co_set_text(lbl_bar, "")
 
         # ── Boost / Gov / EPP ─────────────────────────────────────────
-        try:
-            with open('/sys/devices/system/cpu/cpufreq/boost') as bf:
-                boost_on = bf.read().strip() == "1"
-        except Exception:
-            boost_on = None
+        boost_raw = self._co_live_read('/sys/devices/system/cpu/cpufreq/boost')
+        boost_on = (boost_raw == "1") if boost_raw is not None else None
 
         gov_raw = self._co_live_read(
             '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor')
@@ -3327,7 +3352,7 @@ except Exception as e:
             '/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference')
 
         if boost_on is None:
-            b_str = '<span style="color:{C_VDGREY}">Boost: ?</span>'
+            b_str = f'<span style="color:{C_VDGREY}">Boost: ?</span>'
         elif boost_on:
             b_str = f'<span style="color:{C_GREEN}">Boost: ON</span>'
         else:
@@ -3336,7 +3361,8 @@ except Exception as e:
         sep  = f'<span style="color:{C_VDGREY}"> · </span>'
         gov  = gov_raw or "?"
         epp  = epp_raw or "?"
-        self._co_boost_lbl.setText(
+        self._co_set_text(
+            self._co_boost_lbl,
             f'{b_str}{sep}'
             f'<span style="color:{C_GREY}">Gov: {gov}</span>{sep}'
             f'<span style="color:{C_DGREY}">EPP: {epp}</span>'
@@ -3502,7 +3528,11 @@ except Exception as e:
         self._cf_process.readyReadStandardOutput.connect(self._cf_read_output)
         self._cf_process.readyReadStandardError.connect(self._cf_read_error)
         self._cf_process.finished.connect(self._cf_finished)
-        parts = cmd.split()
+        try:
+            parts = shlex.split(cmd)
+        except ValueError as e:
+            self.cf_output.append(f"ERROR: invalid command syntax: {e}")
+            return
         prog = parts[0] if parts else "corefreq-cli"
         args = parts[1:] if len(parts) > 1 else []
         self._cf_process.start(prog, args)
@@ -4296,16 +4326,11 @@ except Exception as e:
         self.isolation_revert_btn.setEnabled(False)
         self._log(f"🔒 Applying CPU isolation (launcher: {launcher})...")
 
-        def done(ok):
-            self.isolation_apply_btn.setEnabled(True)
-            self.isolation_revert_btn.setEnabled(True)
-            self._refresh_isolation_status()
-
         self._run_root_helper_command(
             {"op": "apply_cpu_isolation", "launcher": launcher},
             success_msg="CPU isolation applied (theGood/theUgly).",
             fail_msg="CPU isolation could not be applied.",
-            callback=done,
+            callback=self._reenable_isolation_buttons,
         )
 
     def _on_isolation_revert_clicked(self):
@@ -4313,17 +4338,18 @@ except Exception as e:
         self.isolation_revert_btn.setEnabled(False)
         self._log("♻ Reverting CPU isolation...")
 
-        def done(ok):
-            self.isolation_apply_btn.setEnabled(True)
-            self.isolation_revert_btn.setEnabled(True)
-            self._refresh_isolation_status()
-
         self._run_root_helper_command(
             {"op": "revert_cpu_isolation"},
             success_msg="CPU isolation reverted (theGood/theUgly removed).",
             fail_msg="CPU isolation could not be reverted.",
-            callback=done,
+            callback=self._reenable_isolation_buttons,
         )
+
+    def _reenable_isolation_buttons(self, ok):
+        # D10: shared apply/revert completion callback
+        self.isolation_apply_btn.setEnabled(True)
+        self.isolation_revert_btn.setEnabled(True)
+        self._refresh_isolation_status()
 
     # ─── ROOT COMMANDS ──────────────────────────────────────────────────
     # K1 düzeltmesi: _run_root_command (ve _on_root_output/_on_root_error/
@@ -6631,11 +6657,6 @@ except Exception as e:
         self._rgb_queue_busy = True
         args = self._rgb_cmd_queue.pop(0)
 
-        # Clean up the previous QProcess object
-        if self._rgb_process is not None:
-            self._rgb_process.deleteLater()
-            self._rgb_process = None
-
         cmd_str = self._alienfx_cli + " " + " ".join(args)
         self._log(f"[alienfx] ▶ {cmd_str}")
 
@@ -6654,6 +6675,11 @@ except Exception as e:
             ok = (exit_code == 0)
             icon = "✅" if ok else "❌"
             self._log(f"[alienfx] {icon} exited: {exit_code}")
+            # D12: release this process now that it has finished, rather than
+            # leaving the last one pending until the next enqueue.
+            if self._rgb_process is proc:
+                self._rgb_process = None
+            proc.deleteLater()
             # Run the next command (50ms delay — USB HID settle)
             QTimer.singleShot(50, self._rgb_process_next)
 

@@ -1,121 +1,252 @@
 # RyzenAdj GUI
 
-PySide6 GUI + system tray for AMD Ryzen (Alienware M16 R1 AMD) power management, GPU V/F curve (nvcurve), and gaming/system optimizations.
+AMD Ryzen (Alienware M16 R1 AMD) güç yönetimi, GPU V/F eğrisi (nvcurve) ve
+oyun/sistem optimizasyonları için PySide6 GUI + sistem tepsisi.
 
-## Installation
+## Kurulum
 
 ```bash
 chmod +x install.sh
 sudo ./install.sh
 ```
 
-If you are coming from an older installation (a previous version of this project that used relative directories based on `SCRIPT_DIR`) and your actual profile data is in a different location:
+Eski (bu projenin önceki, `SCRIPT_DIR`'e göreceli dizin kullanan) bir
+kurulumdan geliyorsanız ve gerçek profil verileriniz farklı bir yerdeyse:
 
 ```bash
-sudo ./install.sh --migrate-profiles /home/USER/Ryzen/profiles
+sudo ./install.sh --migrate-profiles /home/KULLANICI/Ryzen/profiles
 ```
 
-`install.sh` also attempts to automatically detect the `Ryzen/profiles` folder under `$SUDO_USER`'s home directory; `--migrate-profiles` is only used when you need to specify a different path.
+`install.sh`, `$SUDO_USER`'ın ev dizini altında `Ryzen/profiles` klasörünü
+de otomatik algılamaya çalışır; `--migrate-profiles` sadece farklı bir yol
+belirtmeniz gerektiğinde kullanılır.
 
-If you do not want the tray to autostart upon KDE/GNOME login:
+Tray'in KDE/GNOME oturum açılışında otomatik başlamasını istemiyorsanız:
 
 ```bash
 sudo ./install.sh --no-autostart
 ```
 
-If you do not want to be prompted for a password at all during power mode changes (this is the default behavior for users in the `wheel`/`sudo` group), you do not need to do anything — the installation configures this automatically. If you prefer to be prompted for a password every time or with a short-term cached password instead:
+Güç modu değişimlerinde parola sorulmasını hiç istemiyorsanız (varsayılan
+davranış budur, `wheel`/`sudo` grubundaki kullanıcılar için), hiçbir şey
+yapmanıza gerek yok — kurulum bunu otomatik ayarlar. Bunun yerine her
+seferinde ya da kısa süreli önbellekli parola sorulmasını tercih
+ediyorsanız:
 
 ```bash
 sudo ./install.sh --no-passwordless
 ```
 
-## Uninstallation
+## Kaldırma
 
 ```bash
-sudo ./uninstall.sh            # removes the application, preserves profiles
-sudo ./uninstall.sh --purge    # also deletes profiles
+sudo ./uninstall.sh            # uygulamayı kaldırır, profilleri korur
+sudo ./uninstall.sh --purge    # profilleri de siler
 ```
 
-## Known Issues and Fixes (Resolved in this Version)
+## Bilinen sorunlar ve düzeltmeleri (bu sürümde çözüldü)
 
-**"Tray does not show the profile changed from the GUI / sometimes the cross icon does not appear at all" (Root Cause and Real Fix):** The previous fix (read order + "recently applied by us" stamp) did not fully resolve the issue because the ONLY way for the tray to learn about a profile change was to monitor the ACPI `platform_profile` sysfs. The actual race condition was as follows:
+**"Tray, GUI'den değiştirilen profili göstermiyor / bazen çarpı işareti
+hiç görünmüyor" (kök neden ve asıl çözüm):** Önceki düzeltme (okuma sırası
++ "yakın zamanda biz uyguladık" damgası) sorunu tam çözmüyordu, çünkü
+tray'in profil değişimini öğrenmesinin TEK yolu ACPI `platform_profile`
+sysfs'ini izlemekti. Gerçek yarış durumu şuydu:
 
-1. `alienfx_cli` modifying the ACPI occurs at the VERY BEGINNING of `apply_profile()`.
-2. The GUI writing the actual profile name to the state file occurs AFTER the operation is COMPLETELY finished (after ryzenadj limits, fan boost, etc., are applied).
-3. The tray's ACPI-monitor would see the event at step (1), meaning BEFORE the correct name was written; at that moment, the OLD profile name was still in the state file. Later, when the GUI wrote the correct name, since ACPI did not change again, there was NOTHING left to trigger the tray — leaving the tray one step behind indefinitely.
+1. `alienfx_cli`'nin ACPI'yi değiştirmesi `apply_profile()`'ın EN BAŞINDA
+   olur.
+2. GUI'nin gerçek profil ismini durum dosyasına yazması ise işlem
+   TAMAMEN bittikten SONRA olur (ryzenadj limitleri, fan boost, vs.
+   uygulandıktan sonra).
+3. Tray'in ACPI-izleyicisi olayı (1)'de, yani doğru isim henüz
+   yazılmadan ÖNCE görüyordu; o an durum dosyasında hâlâ ESKİ profil
+   ismi vardı. Daha sonra (3)'te GUI doğru ismi yazdığında ise ACPI bir
+   daha değişmediği için tray'i tetikleyen HİÇBİR ŞEY kalmıyordu — tray
+   sonsuza kadar bir adım geride kalıyordu.
 
-**Solution — Push-based, event-driven synchronization:** `ryzenadj_common.write_active_profile()` now directly and instantly notifies the tray (if it is running) via a Unix domain socket as soon as it writes the state file (`notify_profile_changed()`). On the tray side (the new `ProfileNotifyListener` class inside `ryzenadj_tray.py`), a blocking `socket.accept()` waits for this message — no polling, CPU overhead is near zero (it only wakes up once every second for a shutdown check, similar to the existing ACPI monitor's 500 ms polling pattern). The moment the message arrives, the tray menu cache is forcibly invalidated and instantly refreshed (which also solves the "sometimes the cross icon does not appear at all" issue), and a `notify-send` notification is displayed. The old ACPI-based monitor remains as a secondary fallback to catch real external changes (e.g., an Fn key combination), but it is no longer the sole source of synchronization.
+**Çözüm — push tabanlı, olay güdümlü senkronizasyon:** `ryzenadj_common.
+write_active_profile()` artık durum dosyasını yazar yazmaz, bir Unix
+domain socket üzerinden tray'e (çalışıyorsa) DOĞRUDAN ve ANINDA haber
+veriyor (`notify_profile_changed()`). Tray tarafında (`ryzenadj_tray.py`
+içindeki yeni `ProfileNotifyListener` sınıfı) bloklayan bir
+`socket.accept()` bu mesajı bekliyor — **polling yok, CPU maliyeti
+sıfıra yakın** (yalnızca kapanış kontrolü için 1 saniyede bir uyanıyor,
+tıpkı mevcut ACPI izleyicisinin 500 ms'lik poll deseni gibi). Mesaj
+geldiği an tray menüsünün önbelleği zorla geçersiz kılınıp anında
+tazeleniyor (bu, "bazen çarpı işareti hiç görünmüyor" sorununu da
+çözüyor) ve bir `notify-send` bildirimi gösteriliyor. Eski ACPI tabanlı
+izleyici, gerçek harici değişiklikleri (örn. bir Fn tuşu kombinasyonu)
+yakalamak için ikincil bir yol olarak duruyor, ama artık senkronizasyonun
+tek kaynağı değil.
 
-If the tray is not running (or the socket does not exist), `notify_profile_changed()` silently does nothing — it never delays or interrupts the profile application flow.
+Tray çalışmıyorsa (ya da soket yoksa) `notify_profile_changed()` sessizce
+hiçbir şey yapmaz — profil uygulama akışını asla geciktirmez ya da
+kesintiye uğratmaz.
 
-**Double notification (the same "profile changed" popup was appearing twice):** Both the GUI and the tray were making their own `notify-send` calls. Now, `write_active_profile()` / `set_active_profile_state()` returns a boolean indicating whether the message actually reached the tray: if the tray is running (message delivered), only the **tray** notification is shown; the GUI does not display its own popup. If the tray is not running, the GUI displays its own notification as a fallback so the user remains informed. Thus, in normal use (when the tray is open), exactly **one** notification appears.
+**Çift bildirim (aynı "profil değişti" popup'ı iki kez çıkıyordu):** Hem
+GUI hem tray kendi `notify-send` çağrısını yapıyordu. Artık
+`write_active_profile()` / `set_active_profile_state()` tray'e mesajın
+gerçekten ulaşıp ulaşmadığını (`bool`) döndürüyor: tray çalışıyorsa
+(mesaj teslim edildiyse) yalnızca **tray** bildirimi gösterir; GUI kendi
+popup'ını göstermez. Tray çalışmıyorsa GUI, kullanıcı hiç haberdar
+olmasın diye, kendi bildirimini fallback olarak gösterir. Yani normal
+kullanımda (tray açıkken) tam olarak **bir** bildirim çıkar.
 
-**"Extra Tools" settings in Custom/G-MODE (THP, sysctls, lru_gen, sched_*) remained in their previous states when switching to other profiles:** The quiet/cool/balanced/balanced-performance profiles contained no "extra" data for these settings, meaning when switching to them, the values left behind by custom/gmode remained exactly as they were in the system. Now:
-- IMMEDIATELY BEFORE switching to `custom`/`gmode`, if a snapshot has not yet been taken for this boot (`/run/ryzenadj-gui/boot_defaults.json` — since `/run` is a tmpfs, this automatically means "once per boot"), the current (clean) values are saved via `root_helper`'s new `capture_boot_defaults` op.
-- When returning to `quiet`/`cool`/`balanced`/`balanced-performance`, the `restore_boot_defaults` op restores these values.
-- If `custom`/`gmode` is never used, the capture is never triggered, and the restore is a no-op (values are still in their boot state).
-- The gaming-tunables list in the GUI (`self.gaming_settings`) has been moved to `ryzenadj_wrapper.GAMING_TUNABLES` — a single source of truth, eliminating the risk of drift between the UI list and capture/restore.
+**Custom/G-MODE'daki "Extra Tools" ayarları (THP, sysctl'ler, lru_gen,
+sched_*) diğer profillere geçince eski haliyle kalıyordu:** quiet/cool/
+balanced/balanced-performance profillerinde bu ayarlar için hiç "extra"
+verisi yoktu, yani bunlara geçildiğinde custom/gmode'un bıraktığı
+değerler system'de aynen kalıyordu. Artık:
+- `custom`/`gmode`'a geçilmeden HEMEN ÖNCE, bu önyükleme için henüz bir
+  anlık görüntü alınmadıysa (`/run/ryzenadj-gui/boot_defaults.json` —
+  `/run` tmpfs olduğundan bu otomatik olarak "önyükleme başına bir kez"
+  anlamına gelir), mevcut (temiz) değerler `root_helper`'ın yeni
+  `capture_boot_defaults` op'u ile kaydediliyor.
+- `quiet`/`cool`/`balanced`/`balanced-performance`'a dönüldüğünde,
+  `restore_boot_defaults` op'u bu değerleri geri yüklüyor.
+- Hiç custom/gmode kullanılmadıysa capture hiç tetiklenmez, restore da
+  no-op'tur (değerler zaten hâlâ önyükleme durumunda).
+- GUI'deki gaming-tunables listesi (`self.gaming_settings`) artık
+  `ryzenadj_wrapper.GAMING_TUNABLES`'a taşındı — tek kaynak, capture/
+  restore ile UI listesi arasında sapma riski yok.
 
-**"lru_gen" status showing "?" in the UI (Diagnostic Improvement):** `root_helper.py`'s `op_read_gaming_status` (and the GUI's rootless pre-check) now displays a distinctive reason instead of an ambiguous "?": `(no file)` (this path does not exist in this kernel), `(no sysctl)`, `(perm denied)`, or `(err: ...)`. See the item below for the actual implementation bug.
+**"lru_gen" durumunun UI'da "?" göstermesi (teşhis iyileştirmesi):**
+`root_helper.py`'nin `op_read_gaming_status`'ı (ve GUI'nin root'suz
+ön-kontrolü) artık belirsiz bir "?" yerine ayırt edici bir sebep
+gösteriyor: `(no file)` (bu path bu kernelde yok), `(no sysctl)`,
+`(perm denied)`, ya da `(err: ...)`. Asıl uygulama bug'ı için aşağıdaki
+maddeye bakın.
 
-**"lru_gen" status was showing "?" in the UI — and more importantly, it was never actually written when custom/gmode was applied:** The command provided (`echo 5 > /sys/kernel/mm/lru_gen/enabled`) already matched the path/value in the code exactly — meaning the write command itself was always correct. The actual bug was that the `extra.gaming` dictionary uses a **NAME**→value mapping like `{"lru_gen": "5", "vm.swappiness": "10", ...}`, where the key is NOT the actual sysfs path. `root_helper.py` (and the script preview) attempted to differentiate between sysctl and file by checking if the key started with `vm.`/`kernel.` or `/`, but `"lru_gen"`, `"sched_min_base_slice"`, `"sched_migration_cost"`, and `"sched_nr_migrate"` matched none of these three patterns. Result: "recommended: 5" appeared in the UI, but when the profile was applied, this value was **never actually written** — it was silently skipped.
+**"lru_gen" durumu UI'da "?" gösteriyordu — ve asıl önemlisi, custom/
+gmode uygulanırken hiç yazılmıyordu:** Verdiğiniz komut
+(`echo 5 > /sys/kernel/mm/lru_gen/enabled`) zaten koddaki path/değerle
+birebir eşleşiyordu — yani yazma komutunun kendisi hep doğruydu. Asıl
+bug şuydu: `extra.gaming` sözlüğü `{"lru_gen": "5", "vm.swappiness":
+"10", ...}` gibi **İSİM**→değer eşlemesi kullanıyor, anahtar gerçek
+sysfs path'i DEĞİL. `root_helper.py` (ve script önizlemesi) bu anahtarın
+`vm.`/`kernel.` ile başlayıp başlamadığına ya da `/` ile başlayıp
+başlamadığına bakarak sysctl/dosya ayrımı yapmaya çalışıyordu — ama
+`"lru_gen"` ve `"sched_min_base_slice"`/`"sched_migration_cost"`/
+`"sched_nr_migrate"` bu üç kalıptan hiçbirine uymuyor. Sonuç: UI'da
+"recommended: 5" görünüyordu ama profil uygulandığında bu değer **hiçbir
+zaman gerçekten yazılmıyordu** — sessizce atlanıyordu.
 
-Now, a `gaming_schema` derived from the `ryzenadj_wrapper.GAMING_TUNABLES` schema (name → actual path/type) is sent to `root_helper.py`; each gaming setting is no longer written by name but by the actual path/type found in this schema. The same fix was applied to the script-preview code (`_build_shell_script_content`). Furthermore, an unknown gaming key (with no match in the schema) is no longer silently swallowed; it is explicitly flagged in the log as "unknown gaming setting (no schema)".
+Artık `root_helper.py`'ye, `ryzenadj_wrapper.GAMING_TUNABLES` şemasından
+(isim → gerçek path/type) türetilen bir `gaming_schema` gönderiliyor;
+her gaming ayarı artık isimle değil, bu şemadan bulunan gerçek path/type
+ile yazılıyor. Aynı düzeltme script-önizleme koduna (`_build_shell_
+script_content`) da uygulandı. Ayrıca bilinmeyen bir gaming anahtarı
+(şemada karşılığı olmayan) artık sessizce yutulmuyor, log'da açıkça
+"unknown gaming setting (no schema)" olarak işaretleniyor.
 
-**"Prompts for password on every power mode change":** The `com.ryzenadj.gui.policy` file was using the `<allow_active>auth_admin_keep_always</allow_active>` value — which is an INVALID polkit value (polkit only recognizes `no`, `yes`, `auth_self`, `auth_self_keep`, `auth_admin`, `auth_admin_keep`). The invalid value caused polkit to reject this action, forcing pkexec to fall back to the default action (uncached, prompting for a password every time). Now:
-- The valid `auth_admin_keep` stands as a backup in the `.policy` file,
-- The actual authorization comes from the newly added `/etc/polkit-1/rules.d/49-ryzenadj-gui.rules` JavaScript rule: it grants **completely passwordless** permission for local, active users in the `wheel`/`sudo` group (which is kept secure since `root_helper.py` is already locked down with `0700` + allowlist + validation).
+**"Her güç modu değişiminde parola soruyor":** `com.ryzenadj.gui.policy`
+dosyasında `<allow_active>auth_admin_keep_always</allow_active>` değeri
+kullanılıyordu — bu, GEÇERSİZ bir polkit değeridir (polkit yalnızca `no`,
+`yes`, `auth_self`, `auth_self_keep`, `auth_admin`, `auth_admin_keep`
+değerlerini tanır). Geçersiz değer polkit'in bu action'ı reddetmesine ve
+pkexec'in varsayılan (önbelleksiz, her seferinde parola isteyen) action'a
+düşmesine yol açıyordu. Artık:
+- `.policy` dosyasında geçerli `auth_admin_keep` bir yedek olarak duruyor,
+- asıl yetkilendirme, yeni eklenen `/etc/polkit-1/rules.d/
+  49-ryzenadj-gui.rules` JavaScript kuralından geliyor: `wheel`/`sudo`
+  grubundaki yerel, aktif kullanıcılar için **tamamen parolasız** izin
+  veriyor (root_helper.py'nin 0700 + allowlist + doğrulama ile zaten
+  kilitli olması bunu güvenli kılıyor).
 
-**Additionally (also fixed in this version):** `ryzenadj_wrapper.py::apply_profile()` — the main "apply profile" function — used to run a bash script using `sudo bash script`; this completely bypassed the pkexec/Polkit architecture and could not work with centralized (root-owned) directories. It is now applied via native Python (without an intermediate bash script) through `root_helper.py`'s new `apply_power_profile` op.
+**Ayrıca (bu sürümde de düzeltildi):** `ryzenadj_wrapper.py::
+apply_profile()` — asıl "profil uygula" işlevi — eskiden bir bash script'i
+`sudo bash script` ile çalıştırıyordu; bu hem pkexec/Polkit mimarisini
+tamamen atlıyordu hem de merkezi (root sahipli) dizinlerle çalışamazdı.
+Artık `root_helper.py`'nin yeni `apply_power_profile` op'u üzerinden,
+native Python ile (ara bash script'i olmadan) uygulanıyor.
 
-## Directory Structure (Post-Installation)
+## Dizin yapısı (kurulum sonrası)
 
-The application now uses fixed system paths compliant with the **Linux Filesystem Hierarchy Standard (FHS)**, completely independent of the installation directory:
+Uygulama artık **Linux Filesystem Hierarchy Standard (FHS)**'e uygun,
+kurulum dizininden tamamen bağımsız sabit sistem yollarını kullanır:
 
-| Path | Content | Ownership |
+| Yol | İçerik | Sahiplik |
 |---|---|---|
-| `/usr/local/lib/ryzenadj-gui/` | Application code (`.py`, icons, `nvcurve/` package) | root:root, 0755 |
-| `/usr/local/lib/ryzenadj-gui/root_helper.py` | Root helper process | root:root, **0700** |
-| `/usr/local/bin/ryzenadj-gui` | Launcher | root:root, 0755 |
-| `/usr/local/bin/ryzenadj-tray` | Launcher | root:root, 0755 |
-| `/etc/ryzenadj-gui/profiles/` | Power profiles (`.json`) | root:root, 0755 (root_helper writes, GUI reads) |
-| `/etc/nvcurve/profiles/` | nvcurve GPU V/F curve profiles | root:root, 0755 |
-| `/var/lib/ryzenadj-gui/scripts/` | Persistent, generated profile activation scripts | root:root, 0755 |
-| `/run/ryzenadj-gui/scripts/` | root_helper's temporary script execution area (tmpfs) | root:root, 0700 |
-| `/run/ryzenadj-gui/boot_defaults.json` | Boot-time gaming/THP settings snapshot (tmpfs) | root:root, 0644 |
+| `/usr/local/lib/ryzenadj-gui/` | Uygulama kodu (`.py`, ikonlar, `nvcurve/` paketi) | root:root, 0755 |
+| `/usr/local/lib/ryzenadj-gui/root_helper.py` | Root yardımcı süreç | root:root, **0700** |
+| `/usr/local/bin/ryzenadj-gui` | Başlatıcı | root:root, 0755 |
+| `/usr/local/bin/ryzenadj-tray` | Başlatıcı | root:root, 0755 |
+| `/etc/ryzenadj-gui/profiles/` | Güç profilleri (`.json`) | root:root, 0755 (root_helper yazar, GUI okur) |
+| `/etc/nvcurve/profiles/` | nvcurve GPU V/F eğri profilleri | root:root, 0755 |
+| `/var/lib/ryzenadj-gui/scripts/` | Kalıcı, üretilmiş profil aktivasyon script'leri | root:root, 0755 |
+| `/run/ryzenadj-gui/scripts/` | root_helper'ın geçici script çalıştırma alanı (tmpfs) | root:root, 0700 |
+| `/run/ryzenadj-gui/boot_defaults.json` | Önyükleme-anı gaming/THP ayar anlık görüntüsü (tmpfs) | root:root, 0644 |
 | `/usr/share/polkit-1/actions/com.ryzenadj.gui.policy` | Polkit action | root:root, 0644 |
-| `/etc/polkit-1/rules.d/49-ryzenadj-gui.rules` | Passwordless authorization rule (JS) | root:root, 0644 |
-| `/usr/share/applications/ryzenadj-gui.desktop` | Desktop entry | root:root, 0644 |
-| `~/.cache/ryzenadj-gui/scripts/` | **Local preview** copy of the "Generate Script" button | user |
-| `~/.local/state/ryzenadj/` | Rotating log file | user |
-| `$XDG_RUNTIME_DIR/ryzenadj-gui/notify.sock` | GUI→tray instant profile-change notification (Unix socket) | user, 0600 |
-| `~/.config/autostart/ryzenadj-tray.desktop` | Tray session autostart | user |
+| `/etc/polkit-1/rules.d/49-ryzenadj-gui.rules` | Parolasız yetkilendirme kuralı (JS) | root:root, 0644 |
+| `/usr/share/applications/ryzenadj-gui.desktop` | Masaüstü girişi | root:root, 0644 |
+| `~/.cache/ryzenadj-gui/scripts/` | "Script Oluştur" butonunun **yerel önizleme** kopyası | kullanıcı |
+| `~/.local/state/ryzenadj/` | Dönen (rotating) log dosyası | kullanıcı |
+| `$XDG_RUNTIME_DIR/ryzenadj-gui/notify.sock` | GUI→tray anlık profil-değişikliği bildirimi (Unix socket) | kullanıcı, 0600 |
+| `~/.config/autostart/ryzenadj-tray.desktop` | Tray oturum-açılış otomatik başlatma | kullanıcı |
 
-Due to being independent of the installation source path, manually copying `/usr/local/lib/ryzenadj-gui` to another location and directly running `ryzenadj_gui.py` is **no longer supported** — all paths are hardcoded to these fixed locations. For development/testing, re-running `install.sh` repeatedly is the safest approach.
+Kurulum yerinden bağımsız olması sayesinde, `/usr/local/lib/ryzenadj-gui`'yi
+elle farklı bir yere kopyalayıp `ryzenadj_gui.py`'yi doğrudan çalıştırmak
+**artık desteklenmiyor** — tüm yollar bu sabit konumlara göre kodlanmıştır.
+Geliştirme/test için `install.sh`'ı tekrar tekrar çalıştırmak en güvenlisi.
 
-## Architectural Note: Why Everything Goes Through `root_helper.py`
+## Mimari notu: neden her şey `root_helper.py` üzerinden geçiyor
 
-The GUI never runs as root. Every operation that modifies hardware parameters (`ryzenadj`, fan boost, CPU isolation, GPU curve, profile saving) is delegated to `/usr/local/lib/ryzenadj-gui/root_helper.py` via `pkexec`. `root_helper.py`:
+GUI hiçbir zaman root olarak çalışmaz. Donanım parametrelerini değiştiren
+her işlem (`ryzenadj`, fan boost, CPU izolasyonu, GPU eğrisi, profil kaydetme)
+`pkexec` ile `/usr/local/lib/ryzenadj-gui/root_helper.py`'ye devredilir.
+`root_helper.py`:
 
-- Only accepts operations from a fixed **allowlist** (`OPERATIONS` dict) — there is no arbitrary command/script execution,
-- Is owned by root:root with `0700` permissions (unreadable/unmodifiable by the user), meaning Polkit `auth_admin_keep_always` (caching the password for 15 minutes) can be securely defined,
-- Performs path-traversal checks and name validation on all file writes.
+- yalnızca sabit bir **allowlist**'teki operasyonları (`OPERATIONS` dict)
+  kabul eder — keyfi komut/script yürütme yoktur,
+- root:root sahipli ve `0700` izinlidir (kullanıcı tarafından okunamaz/
+  değiştirilemez), bu yüzden Polkit `auth_admin_keep_always` (parolayı
+  15 dakika önbellekte tutma) güvenle tanımlanabilir,
+- tüm dosya yazımlarında path-traversal ve isim doğrulaması yapar.
 
-In a previous version, the profile application process (`ryzenadj_wrapper.py::apply_profile`) was left out of this and executed a bash script via `sudo bash script`; this both bypassed the architecture and usually hung or silently failed when launched from the GUI (without a TTY). It is now also performed via native Python (without an intermediate bash script) through `root_helper.py`'s `apply_power_profile` op.
+Önceki bir sürümde profil **uygulama** işlemi (`ryzenadj_wrapper.py::
+apply_profile`) bunun dışında kalıp bir bash script'i `sudo bash script`
+ile çalıştırıyordu; bu hem bu mimariyi baypas ediyordu hem de GUI'den
+başlatıldığında (TTY olmadan) genelde askıda kalıyor ya da sessizce
+başarısız oluyordu. Artık o da `root_helper.py`'nin `apply_power_profile`
+op'u üzerinden, native Python ile (ara bash script'i olmadan) yapılıyor.
 
-## Files Removed from the Project
+## Projeden çıkarılan dosyalar
 
-The following files were not imported or used anywhere and have been removed:
+Aşağıdaki dosyalar hiçbir yerden import edilmiyordu / kullanılmıyordu ve
+kaldırıldı:
 
-- `tab.py` — An unused, never-imported copy/draft of the `_build_tab_extra_tools` method that already exists in `ryzenadj_gui.py`.
-- `secure_qprocess.py`, `secure_privilege_escalation.py` — `ryzenadj_gui.py` tried to import these via `try/except ImportError` "if available", but `SECURE_MODE` / `SecureQProcess` / `run_as_root` were not used anywhere in the code (all root calls had already been migrated to pkexec + `root_helper.py`). Removed along with dead code and the confusing "unsafe mode" warning.
-- `51-ryzenadj-gui.rules` — Intended to be a JavaScript rule file for `/etc/polkit-1/rules.d/`, but its content was entirely a `<policyconfig>` XML (i.e., `.policy` format, incorrect directory/format). If polkit tried to load this, it would likely reject it with a syntax error. The already correct and complete `com.ryzenadj.gui.policy` was left as the sole authorization source.
-- `scripts/` (static, pre-generated `set_*.sh` files) — these are already regenerated at runtime by `ryzenadj_wrapper.write_shell_script()`; there is no need to carry them in the source tree.
-- `redirect-tasks/` and `redirector-*.zip` (removed in a previous session) — The original bash implementation of CPU isolation; it has now been completely rewritten using native Python and cgroup v2 in `root_helper.py`'s `apply_cpu_isolation` / `revert_cpu_isolation` ops.
-- Path-based `op_run_script` inside `root_helper.py` — An unused root-privileged code path since all calls from the GUI were migrated to `op_run_script_content`; removed to reduce the attack surface.
+- `tab.py` — `ryzenadj_gui.py`'de zaten var olan `_build_tab_extra_tools`
+  metodunun kullanılmayan, hiç import edilmeyen bir kopyası/taslağıydı.
+- `secure_qprocess.py`, `secure_privilege_escalation.py` — `ryzenadj_gui.py`
+  bunları `try/except ImportError` ile "varsa" diye içe aktarmaya
+  çalışıyordu ama `SECURE_MODE`/`SecureQProcess`/`run_as_root` kodun
+  hiçbir yerinde kullanılmıyordu (tüm root çağrıları zaten pkexec +
+  `root_helper.py`'ye taşınmıştı). Ölü kod + kafa karıştırıcı "unsafe
+  mode" uyarısıyla birlikte kaldırıldı.
+- `51-ryzenadj-gui.rules` — `/etc/polkit-1/rules.d/` için JavaScript
+  kural dosyası **olması gerekirken** içeriği tam bir `<policyconfig>`
+  XML'iydi (yani `.policy` formatı, yanlış dizin/format). `polkit`
+  bunu yüklemeye çalışsaydı muhtemelen syntax hatasıyla reddederdi.
+  Zaten doğru ve eksiksiz olan `com.ryzenadj.gui.policy` tek yetkilendirme
+  kaynağı olarak bırakıldı.
+- `scripts/` (statik, önceden üretilmiş `set_*.sh` dosyaları) — bunlar
+  zaten çalışma anında `ryzenadj_wrapper.write_shell_script()` tarafından
+  yeniden üretiliyor; kaynak ağacında taşımaya gerek yok.
+- `redirect-tasks/` ve `redirector-*.zip` (önceki oturumda kaldırıldı) —
+  CPU izolasyonunun orijinal bash uygulaması; artık tamamen
+  `root_helper.py`'nin `apply_cpu_isolation`/`revert_cpu_isolation`
+  op'larında (native Python, cgroup v2) yeniden yazılmış durumda.
+- `root_helper.py` içindeki path-tabanlı `op_run_script` — GUI'nin tüm
+  çağrıları `op_run_script_content`'e taşındığı için kullanılmayan bir
+  root-yetkili kod yoluydu; saldırı yüzeyini azaltmak için kaldırıldı.
 
-`patches/` (kernel patches) are left in the repository as a developer reference; they are not copied to the system by the installer.
+`patches/` (kernel patch'leri) geliştirici referansı olarak repoda
+bırakıldı; kurulum tarafından sisteme kopyalanmaz.
 
-## Security Hardening (Summary)
+## Güvenlik sertleştirmeleri (özet)
 
-Fixes implemented in a previous review that are still valid in this tree: whitelisting of arbitrary file writes/execution, path-traversal checks, whitelist verification against bash command injection, reading `/proc` instead of forking for CPU isolation, logging silently swallowed errors, and ensuring callbacks are invoked on every error path. For details, refer to the comments labeled `K1`–`K5`, `O1`–`O7`, and `Q1`–`Q10` within the code.
+Önceki bir incelemede uygulanan ve bu ağaçta da geçerli olan düzeltmeler:
+rastgele dosya yazımı/çalıştırılmasının whitelist edilmesi, path-traversal
+kontrolleri, bash komut enjeksiyonuna karşı whitelist doğrulaması, CPU
+izolasyonunda fork yerine `/proc` okuma, sessizce yutulan hataların
+loglanması, ve callback'lerin her hata yolunda çağrılması. Ayrıntılar için
+kod içindeki `K1`–`K5`, `O1`–`O7`, `Q1`–`Q10` etiketli yorumlara bakın.

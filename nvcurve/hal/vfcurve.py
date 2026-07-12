@@ -8,7 +8,7 @@ from ..nvapi.bootstrap import nvcall, nvcall_raw
 from ..nvapi.constants import (
     FUNC,
     VFP_SIZE, VFP_BASE, VFP_STRIDE,
-    CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF, CT_POINTS,
+    CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF,
 )
 from ..nvapi.types import VFPoint, CurveState
 

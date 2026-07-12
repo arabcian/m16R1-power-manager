@@ -18,7 +18,12 @@ if str(SCRIPT_DIR) not in sys.path:
 from tool_paths import find_tool
 
 LOG_FILE         = Path("/tmp/ryzenadj_tray.log")
-LOCK_PATH        = Path("/tmp/ryzenadj_tray.lock")
+# D13: keep the single-instance lock in the user's private runtime dir
+# (mode 0700, per-user) so another user cannot pre-create it and DoS the tray.
+# STATE_FILE stays in /tmp: it is a documented cross-process contract
+# (see ryzenadj_common.py) and can only move via a coordinated migration.
+_XDG_RUNTIME = os.environ.get("XDG_RUNTIME_DIR")
+LOCK_PATH        = (Path(_XDG_RUNTIME) if _XDG_RUNTIME else Path("/tmp")) / "ryzenadj_tray.lock"
 STATE_FILE       = Path("/tmp/ryzenadj_active_profile.state")
 SYS_PROFILE_PATH = Path("/sys/firmware/acpi/platform_profile")
 

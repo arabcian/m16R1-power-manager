@@ -9,11 +9,15 @@ Requires root (NvAPI needs it).
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import Config, default_config
@@ -49,7 +53,6 @@ from .profiles.native import (
 from .hal.vfcurve import (
     read_clock_offsets,
     read_curve,
-    read_vfp_curve,
     reset_offsets,
     write_global_offset,
     write_offsets,
@@ -1139,11 +1142,6 @@ async def ws_curve(ws: WebSocket):
 
 
 # ── Frontend SPA ──────────────────────────────────────────────────────────────
-
-import os
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pathlib import Path
 
 # When set, suppresses the auto-open browser behaviour so the dev can open
 # the Vite dev server (pnpm dev) manually instead.

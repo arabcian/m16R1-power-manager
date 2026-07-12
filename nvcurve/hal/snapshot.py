@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..nvapi.bootstrap import nvcall_raw
-from ..nvapi.constants import FUNC, CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF, CT_POINTS
+from ..nvapi.constants import FUNC, CT_SIZE, CT_BASE, CT_STRIDE, CT_DELTA_OFF
 from ..nvapi.types import SnapshotInfo
 from .vfcurve import read_clock_table_raw, get_boost_mask
 
