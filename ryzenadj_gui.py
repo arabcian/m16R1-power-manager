@@ -1428,7 +1428,6 @@ class RyzenAdjGUI(QMainWindow):
 
         self._build_tab_gpu()
         self._refresh_profile_list()
-        self._refresh_default_profile_label()
         self._build_tab_extra_tools()
         self._build_tab_rgb()            # ─── RGB Controls ───────────
 
@@ -3611,40 +3610,43 @@ except Exception as e:
         info_layout.addWidget(self.gpu_clock)
         info_layout.addWidget(self.gpu_mem_clock)
         info_layout.addStretch()
-        layout.addWidget(info_group)
 
-        # Profile toolbar
-        profile_toolbar = QHBoxLayout()
-        profile_toolbar.addStretch()
+        # Save Profile As + profile combo live here now, far right of the
+        # status row.
         self.btn_save_profile = QPushButton("💾 Save Profile As...")
         self.btn_save_profile.setObjectName("save_button")
         self.btn_save_profile.setFixedHeight(22)
         self.btn_save_profile.clicked.connect(self._save_profile_as)
-        profile_toolbar.addWidget(self.btn_save_profile)
+        info_layout.addWidget(self.btn_save_profile)
 
+        # The current default (auto-load) profile is marked with a star
+        # directly in the combo box item text instead of a separate label
+        # (see _refresh_profile_list / _refresh_default_star).
         self.profile_combo = QComboBox()
         self.profile_combo.setFixedHeight(22)
         self.profile_combo.setMinimumWidth(150)
         self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
-        profile_toolbar.addWidget(self.profile_combo)
+        info_layout.addWidget(self.profile_combo)
+        layout.addWidget(info_group)
 
-        # Varsayılan OC/UV profili: nvcurve'un kendi `profile default` /
-        # `autoload` mekanizmasını kullanır (bkz. root_helper.py
-        # op_set_default_gpu_profile / op_run_gpu_autoload). Ayrı bir
-        # daemon/servis GEREKTİRMEZ — tray açılışında tek seferlik bir
-        # çağrıyla uygulanır.
-        self.btn_set_default_profile = QPushButton("⭐ Varsayılan Yap")
+        # Default/Remove toolbar: nvcurve's own `profile default` /
+        # `autoload` mechanism (see root_helper.py op_set_default_gpu_profile
+        # / op_run_gpu_autoload). No extra daemon/service — applied once at
+        # tray startup.
+        profile_toolbar = QHBoxLayout()
+        profile_toolbar.addStretch()
+
+        self.btn_set_default_profile = QPushButton("⭐ Default")
         self.btn_set_default_profile.setFixedHeight(22)
+        self.btn_set_default_profile.setFixedWidth(90)
         self.btn_set_default_profile.clicked.connect(self._set_default_gpu_profile)
         profile_toolbar.addWidget(self.btn_set_default_profile)
 
-        self.btn_clear_default_profile = QPushButton("✕ Kaldır")
+        self.btn_clear_default_profile = QPushButton("✕ Remove")
         self.btn_clear_default_profile.setFixedHeight(22)
+        self.btn_clear_default_profile.setFixedWidth(90)
         self.btn_clear_default_profile.clicked.connect(self._clear_default_gpu_profile)
         profile_toolbar.addWidget(self.btn_clear_default_profile)
-
-        self.default_profile_label = SL("Varsayılan: —", color=C_GREY)
-        profile_toolbar.addWidget(self.default_profile_label)
         layout.addLayout(profile_toolbar)
 
         # Point Info
@@ -4638,7 +4640,7 @@ except Exception as e:
         # The callback runs on the main thread (via QTimer.singleShot).
         def on_saved(_):
             self._refresh_profile_list()
-            idx = self.profile_combo.findText(name)
+            idx = self._find_profile_index(name)
             if idx >= 0:
                 self.profile_combo.setCurrentIndex(idx)
 
@@ -4869,6 +4871,17 @@ except Exception as e:
         pass
 
     # ─── GPU PROFILE SAVE / LOAD ──────────────────────────────────────
+    _DEFAULT_MARK = " ★"
+
+    def _strip_default_mark(self, text: str) -> str:
+        return text[: -len(self._DEFAULT_MARK)] if text.endswith(self._DEFAULT_MARK) else text
+
+    def _find_profile_index(self, name: str) -> int:
+        for i in range(self.profile_combo.count()):
+            if self._strip_default_mark(self.profile_combo.itemText(i)) == name:
+                return i
+        return -1
+
     def _refresh_profile_list(self):
         profiles_dir = "/etc/nvcurve/profiles"
         try:
@@ -4877,11 +4890,14 @@ except Exception as e:
                 return
             files = [f for f in os.listdir(profiles_dir) if f.endswith('.json')]
             files.sort()
+            default_name = self._read_default_gpu_profile_name()
             self.profile_combo.blockSignals(True)
             self.profile_combo.clear()
             for f in files:
-                self.profile_combo.addItem(f.replace('.json', ''), f)
-            idx = self.profile_combo.findText('ppm')
+                name = f.replace('.json', '')
+                label = f"{name}{self._DEFAULT_MARK}" if name == default_name else name
+                self.profile_combo.addItem(label, f)
+            idx = self._find_profile_index('ppm')
             if idx >= 0:
                 self.profile_combo.setCurrentIndex(idx)
             elif self.profile_combo.count() > 0:
@@ -4893,7 +4909,7 @@ except Exception as e:
     def _on_profile_selected(self, index):
         if index < 0:
             return
-        profile_name = self.profile_combo.currentText()
+        profile_name = self._strip_default_mark(self.profile_combo.currentText())
         if not profile_name:
             return
         profile_path = f"/etc/nvcurve/profiles/{profile_name}.json"
@@ -4973,13 +4989,14 @@ except Exception as e:
             "power_limit_w": None
         }
 
-    # ─── GPU DEFAULT PROFILE (boot'ta tray tarafından otomatik uygulanır) ──
-    # nvcurve'un kendi `profile default` / `autoload` alt komutlarını
-    # kullanır (bkz. root_helper.py op_set_default_gpu_profile /
-    # op_run_gpu_autoload). Ayrı bir nvcurve daemon'ı veya systemd
-    # servisi ÇALIŞTIRMAZ — tray sadece açılışta tek seferlik bir
-    # `nvcurve autoload` çağrısı tetikler.
-    def _refresh_default_profile_label(self):
+    # ─── GPU DEFAULT PROFILE (auto-applied by the tray at boot) ────────
+    # Uses nvcurve's own `profile default` / `autoload` subcommands (see
+    # root_helper.py op_set_default_gpu_profile / op_run_gpu_autoload).
+    # Does NOT run a separate nvcurve daemon or systemd service — the
+    # tray just triggers a single one-shot `nvcurve autoload` call at
+    # startup. The current default is shown as a ★ next to its name in
+    # the profile combo box rather than a separate label.
+    def _read_default_gpu_profile_name(self):
         try:
             with open("/etc/nvcurve/config.json", "r") as f:
                 cfg = json.load(f)
@@ -4987,20 +5004,31 @@ except Exception as e:
             if not profiles and cfg.get("auto_load_profile"):
                 profiles = {"idx:0": cfg["auto_load_profile"]}
             if profiles:
-                name = next(iter(profiles.values()))
-                self.default_profile_label.setText(f"Varsayılan: {name}")
-            else:
-                self.default_profile_label.setText("Varsayılan: —")
+                return next(iter(profiles.values()))
         except (FileNotFoundError, json.JSONDecodeError):
-            self.default_profile_label.setText("Varsayılan: —")
+            pass
         except Exception as e:
-            self.default_profile_label.setText("Varsayılan: —")
-            self._log(f"⚠️ Varsayılan profil okunamadı: {e}")
+            self._log(f"⚠️ Could not read default GPU profile: {e}")
+        return None
+
+    def _refresh_default_star(self):
+        """Lightweight update: re-marks the ★ on the current default
+        item without rebuilding the whole combo or losing the selection."""
+        default_name = self._read_default_gpu_profile_name()
+        self.profile_combo.blockSignals(True)
+        current_idx = self.profile_combo.currentIndex()
+        for i in range(self.profile_combo.count()):
+            plain = self._strip_default_mark(self.profile_combo.itemText(i))
+            label = f"{plain}{self._DEFAULT_MARK}" if plain == default_name else plain
+            if self.profile_combo.itemText(i) != label:
+                self.profile_combo.setItemText(i, label)
+        self.profile_combo.setCurrentIndex(current_idx)
+        self.profile_combo.blockSignals(False)
 
     def _set_default_gpu_profile(self):
-        profile_name = self.profile_combo.currentText()
+        profile_name = self._strip_default_mark(self.profile_combo.currentText())
         if not profile_name:
-            self._log("❌ Varsayılan yapılacak bir profil seçili değil.")
+            self._log("❌ No profile selected to set as default.")
             return
         project_dir = os.path.dirname(os.path.abspath(__file__))
         payload = {
@@ -5010,10 +5038,10 @@ except Exception as e:
         }
         self._run_root_helper_command(
             payload,
-            f"'{profile_name}' varsayılan GPU profili olarak ayarlandı. "
-            f"(RyzenAdj tray bir sonraki açılışta otomatik uygulayacak.)",
-            f"'{profile_name}' varsayılan yapılamadı.",
-            callback=lambda _: self._refresh_default_profile_label(),
+            f"'{profile_name}' set as default GPU profile. "
+            f"(RyzenAdj tray will auto-apply it on next startup.)",
+            f"Could not set '{profile_name}' as default.",
+            callback=lambda _: self._refresh_default_star(),
         )
 
     def _clear_default_gpu_profile(self):
@@ -5025,9 +5053,9 @@ except Exception as e:
         }
         self._run_root_helper_command(
             payload,
-            "Varsayılan GPU profili kaldırıldı.",
-            "Varsayılan profil kaldırılamadı.",
-            callback=lambda _: self._refresh_default_profile_label(),
+            "Default GPU profile removed.",
+            "Could not remove default GPU profile.",
+            callback=lambda _: self._refresh_default_star(),
         )
 
     # ─── GPU INFORMATION ──────────────────────────────────────────────

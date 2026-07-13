@@ -411,7 +411,7 @@ class RyzenTray:
 
     # ─── GPU DEFAULT OC/UV PROFILE AUTO-APPLY ───────────────────────────
     def _apply_default_gpu_profile(self):
-        """Boot sırasında GPU tuning sekmesinde 'Varsayılan Yap' ile
+        """Boot sırasında GPU tuning sekmesinde 'Default' ile
         işaretlenmiş OC/UV profilini yükler.
 
         Kalıcı bir nvcurve daemon/servis BAŞLATMAZ: yalnızca root_helper
