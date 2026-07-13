@@ -348,6 +348,12 @@ class RyzenTray:
         # Boot'ta varsayılan RGB profilini yükle (geciktirilmiş — USB HID hazır olsun)
         QTimer.singleShot(5000, self._apply_default_rgb)
 
+        # Boot'ta varsayılan GPU OC/UV profilini yükle. RGB'den farklı bir
+        # gecikmeyle (iki ayrı pkexec/polkit isteğinin aynı anda açılıp
+        # çakışmaması için). Ayrı bir nvcurve daemon/servis BAŞLATMAZ —
+        # tek seferlik bir `nvcurve autoload` çağrısı (bkz. _apply_default_gpu_profile).
+        QTimer.singleShot(7000, self._apply_default_gpu_profile)
+
     # ─── RGB PROFILE AUTO-APPLY ─────────────────────────────────────────
 
     _RGB_PROFILES_PATH  = Path.home() / ".config/ryzenadj_gui/rgb_profiles.json"
@@ -402,6 +408,29 @@ class RyzenTray:
 
         except Exception as e:
             log(f"RGB auto-apply error: {e}")
+
+    # ─── GPU DEFAULT OC/UV PROFILE AUTO-APPLY ───────────────────────────
+    def _apply_default_gpu_profile(self):
+        """Boot sırasında GPU tuning sekmesinde 'Varsayılan Yap' ile
+        işaretlenmiş OC/UV profilini yükler.
+
+        Kalıcı bir nvcurve daemon/servis BAŞLATMAZ: yalnızca root_helper
+        üzerinden (pkexec, RGB/CPU profilleriyle aynı polkit auth cache'i
+        paylaşan) `nvcurve autoload` komutunu tek seferlik çalıştırır.
+        Bu komut /etc/nvcurve/config.json'da bir varsayılan ayarlanmamışsa
+        sessizce no-op olur — o yüzden burada ayrıca bir "dosya var mı"
+        kontrolüne gerek yok.
+        """
+        try:
+            project_dir = str(SCRIPT_DIR)
+            payload = {"op": "run_gpu_autoload", "project_dir": project_dir}
+            ok, msg = wrapper._call_root_helper(payload, timeout=60)
+            if ok:
+                log(f"GPU default profile autoload: {msg}")
+            else:
+                log(f"GPU default profile autoload failed: {msg}")
+        except Exception as e:
+            log(f"GPU default profile autoload error: {e}")
 
     def _apply_perkey_rgb(self, pk_data: dict, cli: str):
         """Per-key layout'u setone komutlarına çevirip kuyruğa alır.

@@ -1428,6 +1428,7 @@ class RyzenAdjGUI(QMainWindow):
 
         self._build_tab_gpu()
         self._refresh_profile_list()
+        self._refresh_default_profile_label()
         self._build_tab_extra_tools()
         self._build_tab_rgb()            # ─── RGB Controls ───────────
 
@@ -3626,6 +3627,24 @@ except Exception as e:
         self.profile_combo.setMinimumWidth(150)
         self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
         profile_toolbar.addWidget(self.profile_combo)
+
+        # Varsayılan OC/UV profili: nvcurve'un kendi `profile default` /
+        # `autoload` mekanizmasını kullanır (bkz. root_helper.py
+        # op_set_default_gpu_profile / op_run_gpu_autoload). Ayrı bir
+        # daemon/servis GEREKTİRMEZ — tray açılışında tek seferlik bir
+        # çağrıyla uygulanır.
+        self.btn_set_default_profile = QPushButton("⭐ Varsayılan Yap")
+        self.btn_set_default_profile.setFixedHeight(22)
+        self.btn_set_default_profile.clicked.connect(self._set_default_gpu_profile)
+        profile_toolbar.addWidget(self.btn_set_default_profile)
+
+        self.btn_clear_default_profile = QPushButton("✕ Kaldır")
+        self.btn_clear_default_profile.setFixedHeight(22)
+        self.btn_clear_default_profile.clicked.connect(self._clear_default_gpu_profile)
+        profile_toolbar.addWidget(self.btn_clear_default_profile)
+
+        self.default_profile_label = SL("Varsayılan: —", color=C_GREY)
+        profile_toolbar.addWidget(self.default_profile_label)
         layout.addLayout(profile_toolbar)
 
         # Point Info
@@ -4953,6 +4972,63 @@ except Exception as e:
             "mem_offset_mhz": mem_off,
             "power_limit_w": None
         }
+
+    # ─── GPU DEFAULT PROFILE (boot'ta tray tarafından otomatik uygulanır) ──
+    # nvcurve'un kendi `profile default` / `autoload` alt komutlarını
+    # kullanır (bkz. root_helper.py op_set_default_gpu_profile /
+    # op_run_gpu_autoload). Ayrı bir nvcurve daemon'ı veya systemd
+    # servisi ÇALIŞTIRMAZ — tray sadece açılışta tek seferlik bir
+    # `nvcurve autoload` çağrısı tetikler.
+    def _refresh_default_profile_label(self):
+        try:
+            with open("/etc/nvcurve/config.json", "r") as f:
+                cfg = json.load(f)
+            profiles = cfg.get("auto_load_profiles", {})
+            if not profiles and cfg.get("auto_load_profile"):
+                profiles = {"idx:0": cfg["auto_load_profile"]}
+            if profiles:
+                name = next(iter(profiles.values()))
+                self.default_profile_label.setText(f"Varsayılan: {name}")
+            else:
+                self.default_profile_label.setText("Varsayılan: —")
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.default_profile_label.setText("Varsayılan: —")
+        except Exception as e:
+            self.default_profile_label.setText("Varsayılan: —")
+            self._log(f"⚠️ Varsayılan profil okunamadı: {e}")
+
+    def _set_default_gpu_profile(self):
+        profile_name = self.profile_combo.currentText()
+        if not profile_name:
+            self._log("❌ Varsayılan yapılacak bir profil seçili değil.")
+            return
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        payload = {
+            "op": "set_default_gpu_profile",
+            "project_dir": project_dir,
+            "name": profile_name,
+        }
+        self._run_root_helper_command(
+            payload,
+            f"'{profile_name}' varsayılan GPU profili olarak ayarlandı. "
+            f"(RyzenAdj tray bir sonraki açılışta otomatik uygulayacak.)",
+            f"'{profile_name}' varsayılan yapılamadı.",
+            callback=lambda _: self._refresh_default_profile_label(),
+        )
+
+    def _clear_default_gpu_profile(self):
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        payload = {
+            "op": "set_default_gpu_profile",
+            "project_dir": project_dir,
+            "clear": True,
+        }
+        self._run_root_helper_command(
+            payload,
+            "Varsayılan GPU profili kaldırıldı.",
+            "Varsayılan profil kaldırılamadı.",
+            callback=lambda _: self._refresh_default_profile_label(),
+        )
 
     # ─── GPU INFORMATION ──────────────────────────────────────────────
     def _update_gpu_info(self):

@@ -132,6 +132,92 @@ def op_write_nvcurve_profile(params: dict) -> dict:
     return {"ok": True, "message": f"Profile written: {target_path}"}
 
 
+def op_set_default_gpu_profile(params: dict) -> dict:
+    """GPU tuning sekmesindeki 'Varsayılan Yap' düğmesinin karşılığı.
+
+    Ayrı bir daemon/servis KURMAZ — nvcurve'un zaten var olan
+    `profile default` alt komutunu çağırıp /etc/nvcurve/config.json
+    içindeki auto_load_profiles map'ine tek bir satır yazar. Gerçek
+    uygulama, tray açılışında bir kez tetiklenen `nvcurve autoload`
+    çağrısıyla (bkz. op_run_gpu_autoload) olur.
+    """
+    project_dir = params.get("project_dir")
+    name = params.get("name")
+    clear = bool(params.get("clear", False))
+
+    if not isinstance(project_dir, str) or not project_dir:
+        return {"ok": False, "error": "project_dir required"}
+
+    if not clear:
+        if not isinstance(name, str) or not PROFILE_NAME_RE.match(name):
+            return {"ok": False, "error": "Invalid profile name"}
+        # Varsayılan olarak yalnızca zaten diskte var olan bir profil
+        # işaretlenebilir — olmayan bir isim autoload sırasında sessizce
+        # atlanır (bkz. nvcurve/profiles/apply.py: apply_with_retry
+        # FileNotFoundError'da log basıp False döner), o yüzden burada
+        # erken ve anlaşılır bir hata vermek daha iyi.
+        profile_path = os.path.join(NVCURVE_PROFILES_DIR, f"{name}.json")
+        if not os.path.isfile(profile_path):
+            return {"ok": False, "error": f"Profile not found: {name}"}
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+    args = [sys.executable, "-m", "nvcurve", "profile", "default"]
+    args += ["--clear"] if clear else [name]
+
+    result = subprocess.run(
+        args, capture_output=True, text=True, env=env, cwd=project_dir
+    )
+    if result.returncode != 0:
+        err = (result.stderr or "").strip()
+        return {"ok": False, "error": err or "nvcurve profile default failed"}
+
+    # config.json root:root, mode 0644 olmalı ki root gerektirmeden
+    # (tray/GUI kullanıcı olarak) okunabilsin.
+    try:
+        os.chmod("/etc/nvcurve/config.json", 0o644)
+    except OSError:
+        pass
+
+    out = (result.stdout or "").strip()
+    if clear:
+        msg = out or "Default GPU profile cleared."
+    else:
+        msg = out or f"Default GPU profile set to '{name}'."
+    return {"ok": True, "message": msg}
+
+
+def op_run_gpu_autoload(params: dict) -> dict:
+    """Tray açılışında ÇAĞRILAN tek seferlik komut.
+
+    nvcurve'un `autoload` alt komutu, /etc/nvcurve/config.json içinde
+    `profile default` ile ayarlanmış profili okuyup uygular ve çıkar.
+    Bu KALICI bir daemon/servis DEĞİLDİR — her tray başlangıcında bir kez
+    çalışıp biten, root_helper üzerinden pkexec ile tetiklenen sıradan
+    bir alt süreçtir. Varsayılan profil ayarlanmamışsa nvcurve zaten
+    no-op olarak loglayıp normal (0) çıkış koduyla döner.
+    """
+    project_dir = params.get("project_dir")
+    if not isinstance(project_dir, str) or not project_dir:
+        return {"ok": False, "error": "project_dir required"}
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nvcurve", "autoload"],
+        capture_output=True, text=True, env=env, cwd=project_dir
+    )
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    combined = "\n".join(x for x in (out, err) if x)
+
+    if result.returncode != 0:
+        return {"ok": False, "error": combined or f"autoload failed (code {result.returncode})"}
+    return {"ok": True, "message": combined or "No default GPU profile configured."}
+
+
 # ─── SENİN ESKİ SCRIPT İÇERİKLERİNİN BİREBİR TAŞINMIŞ HALİ ───────────────────
 
 def op_save_power_profile(params: dict) -> dict:
@@ -1006,6 +1092,8 @@ def op_run_script_content(params: dict) -> dict:
 OPERATIONS = {
     "reload_alienware_wmi": op_reload_alienware_wmi,
     "write_nvcurve_profile": op_write_nvcurve_profile,
+    "set_default_gpu_profile": op_set_default_gpu_profile,
+    "run_gpu_autoload": op_run_gpu_autoload,
 
     # Yeni eklenen güvenli operasyon köprüleri:
     "save_power_profile": op_save_power_profile,
