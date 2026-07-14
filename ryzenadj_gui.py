@@ -7143,9 +7143,15 @@ except Exception as e:
             if not self.gpu_info_timer.isActive():
                 self.gpu_info_timer.start()
                 self._update_gpu_info()   # an immediate update
+            # Auto "Read Current Curve" once per tab-open, only on the
+            # transition into visibility (not on every timer tick / repeated
+            # calls while the tab stays active).
+            if not getattr(self, '_gpu_tab_was_visible', False):
+                self._read_gpu_curve()
         else:
             if self.gpu_info_timer.isActive():
                 self.gpu_info_timer.stop()
+        self._gpu_tab_was_visible = gpu_visible
 
         # CPPC timer (B4)
         if co_visible:
