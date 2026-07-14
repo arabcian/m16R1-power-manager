@@ -3651,9 +3651,15 @@ except Exception as e:
         profile_toolbar.addWidget(self.btn_delete_profile)
         layout.addLayout(profile_toolbar)
 
-        # Point Info & TGP Controls
+        # ─── Info Panel (Point Info & Controls) + cTGP (yan yana) ──────────
+        dual_panel_layout = QHBoxLayout()
+        dual_panel_layout.setSpacing(6)
+
+        # 1) Point Info & Controls (solda, daraltılmış)
         info_panel = QGroupBox(" Point Info & Controls ")
         info_panel_layout = QHBoxLayout(info_panel)
+        info_panel_layout.setContentsMargins(6, 6, 6, 6)
+        info_panel_layout.setSpacing(4)
 
         self.point_index_label = SL("Selected: -", color=C_GREY)
         self.point_voltage_label = SL("Voltage: - mV", color=C_GREY)
@@ -3665,9 +3671,12 @@ except Exception as e:
         self.point_offset_spin.setValue(0)
         self.point_offset_spin.setSuffix(" MHz")
         self.point_offset_spin.setSingleStep(1)
-        self.point_offset_spin.setFixedWidth(100)
+        self.point_offset_spin.setFixedWidth(80)
         self.point_offset_spin.valueChanged.connect(self._on_point_offset_spin_changed)
         self.point_offset_spin.setEnabled(False)
+
+    for lbl in (self.point_index_label, self.point_voltage_label, self.point_freq_label, self.point_offset_label):
+        lbl.setFixedWidth(90)
 
         info_panel_layout.addWidget(self.point_index_label)
         info_panel_layout.addWidget(self.point_voltage_label)
@@ -3675,60 +3684,38 @@ except Exception as e:
         info_panel_layout.addWidget(self.point_offset_label)
         info_panel_layout.addWidget(self.point_offset_spin)
 
-        # Sola yaslamak ve arayı açmak için boşluk ekliyoruz
-        info_panel_layout.addStretch()
-
-        # ==========================================
-        # 1. BÖLÜM: Flatten After Index
-        # ==========================================
-        limit_label = SL("Flatten After Index:", color=C_GREY)
+        # Flatten After Index (küçültüldü)
+        limit_label = SL("Flatten:", color=C_GREY)
+        limit_label.setFixedWidth(55)
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(-1, 126)
         self.limit_spin.setSpecialValueText(" ")
         self.limit_spin.setValue(-1)
         self.limit_spin.setSingleStep(1)
-        self.limit_spin.setFixedHeight(25)
-        self.limit_spin.setFixedWidth(70)
+        self.limit_spin.setFixedHeight(22)
+        self.limit_spin.setFixedWidth(60)
         self.limit_spin.editingFinished.connect(self._on_flatten_entered)
 
         info_panel_layout.addWidget(limit_label)
         info_panel_layout.addWidget(self.limit_spin)
+        info_panel_layout.addStretch()
 
-        info_panel_layout.addSpacing(15) # Araya biraz boşluk
+        dual_panel_layout.addWidget(info_panel, stretch=1)
 
-        # ==========================================
-        # ARA BÖLÜCÜ ÇİZGİ
-        # ==========================================
-        separator = QFrame()
-        separator.setFrameShape(QFrame.VLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        separator.setStyleSheet(f"color: {C_GREY};")
-        info_panel_layout.addWidget(separator)
+        # 2) cTGP (sağda) - sadece slider + değer + apply
+        tgp_group = QGroupBox(" cTGP ")
+        tgp_layout = QHBoxLayout(tgp_group)
+        tgp_layout.setContentsMargins(8, 6, 8, 6)
+        tgp_layout.setSpacing(6)
 
-        info_panel_layout.addSpacing(15) # Çizgiden sonra boşluk
-
-        # ==========================================
-        # 2. BÖLÜM: GPU TGP (130W - 175W)
-        # ==========================================
-
-        g_ctdp = QGroupBox(" cTDP ")
-
-        # Başlığı sol üste (top left) taşır ve boşlukları ayarlar
-        g_ctdp.setStyleSheet("""
-            QGroupBox {
-                margin-top: 1.5ex; /* Kutu içeriğinin başlıkla çakışmaması için üst boşluk */
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left; /* Başlığı tam sol üste sabitler */
-                padding: 0 5px; /* Yazının sağından solundan 5px boşluk bırakır (çizgiyi keser) */
-                left: 10px; /* Soldan ne kadar içeride başlayacağını piksel olarak belirler */
-            }
-        """)
         self.tgp_slider = QSlider(Qt.Horizontal)
         self.tgp_slider.setRange(130, 175)
         self.tgp_slider.setValue(130)
-        self.tgp_slider.setFixedWidth(100) # Tasarımı bozmaması için genişliği sabitledik
+        self.tgp_slider.setFixedWidth(160)
+        self.tgp_slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
+            f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
+        )
 
         self.tgp_value_label = SL("130W", color=C_CYAN)
         self.tgp_value_label.setFixedWidth(40)
@@ -3737,17 +3724,20 @@ except Exception as e:
             lambda v: self.tgp_value_label.setText(f"{v}W")
         )
 
-        self.btn_apply_tgp = QPushButton("🚀 Apply")
+        self.btn_apply_tgp = QPushButton("Apply")
         self.btn_apply_tgp.setObjectName("apply_button")
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
-        info_panel_layout.addWidget(self.tgp_slider)
-        info_panel_layout.addWidget(self.tgp_value_label)
-        info_panel_layout.addWidget(self.btn_apply_tgp)
+        tgp_layout.addWidget(self.tgp_slider)
+        tgp_layout.addWidget(self.tgp_value_label)
+        tgp_layout.addWidget(self.btn_apply_tgp)
+        tgp_layout.addStretch()
 
-        # Grubu ana düzene ekle
-        layout.addWidget(info_panel)
+        dual_panel_layout.addWidget(tgp_group, stretch=1)
+
+        # Ana layout'a yan yana paneli ekle
+        layout.addLayout(dual_panel_layout)
 
         # V/F Curve
         curve_group = QGroupBox(" V/F Curve ")
@@ -3806,7 +3796,7 @@ except Exception as e:
         # MHz window instead of nudging the V/F curve (mirrors nvidia_oc's
         # --min-mem-clock/--max-mem-clock). 0 = not set on either spin box.
         vram_lock_label = SL("VRAM Lock:", color=C_GREY)
-        control_layout.addWidget(vram_lock_label)
+        control_layout.addWidget(vram_loinfo_panel.setAlignment(Qt.AlignLeft) ck_label)
 
         self.vram_lock_min_spin = QSpinBox()
         self.vram_lock_min_spin.setRange(0, 20000)
