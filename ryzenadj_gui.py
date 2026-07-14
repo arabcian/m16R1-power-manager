@@ -3874,19 +3874,26 @@ except Exception as e:
         target_watt = self.tgp_slider.value()
         self._log(f"⚙️ GPU TGP {target_watt}W olarak ayarlanıyor...")
 
-        # root_helper.py halihazırda yetkili (root) olarak çalıştığı için
-        # sudo kullanmadan doğrudan betik yolunu çağırıyoruz.
-        # Betiğin çıktılarını yakalayıp GUI'nin log veya hata mekanizmasına iletiyoruz.
-        script_content = f"""#!/usr/bin/env bash
-out=$(/usr/local/sbin/nvctgp {target_watt} 2>&1)
-rc=$?
+        # root_helper.py bu içeriği Python olarak çalıştıracağı için subprocess kullanıyoruz.
+        script_content = f"""
+import subprocess
+import sys
 
-if [ $rc -ne 0 ]; then
-    echo "WARNING: nvctgp hatası: $out" >&2
-    exit $rc
-else
-    echo "OK: $out"
-fi
+try:
+    # nvctgp <watt> komutunu çalıştır
+    result = subprocess.run(['/usr/local/sbin/nvctgp', '{target_watt}'], capture_output=True, text=True)
+
+    if result.returncode != 0:
+        # Hata durumunda stderr veya stdout'u yakala ve root_helper'a WARNING olarak ilet
+        error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
+        print(f"WARNING: nvctgp hatası (Kod {{result.returncode}}): {{error_msg}}", file=sys.stderr)
+        sys.exit(result.returncode)
+    else:
+        # Başarılı olduğunda çıktıyı logla
+        print(f"OK: {{result.stdout.strip()}}")
+except Exception as e:
+    print(f"WARNING: nvctgp çalıştırılamadı: {{e}}", file=sys.stderr)
+    sys.exit(1)
 """
         self._run_root_helper_command(
             {"op": "run_script_content", "content": script_content},
