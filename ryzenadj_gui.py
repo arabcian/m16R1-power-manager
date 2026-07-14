@@ -3589,7 +3589,7 @@ except Exception as e:
             self._cf_timer.start()
 
     # ─── TAB 4: GPU TUNING ──────────────────────────────────────────────
-    def _build_tab_gpu(self):
+def _build_tab_gpu(self):
         tab = QWidget()
         tab.setStyleSheet(f"background:{C_BG};")
         layout = QVBoxLayout(tab)
@@ -3611,7 +3611,7 @@ except Exception as e:
         info_layout.addWidget(self.gpu_mem_clock)
         info_layout.addStretch()
 
-        # Save As + profile combo live here now, far right of the status row.
+        # Save As + profile combo
         self.btn_save_profile = QPushButton("💾 Save As")
         self.btn_save_profile.setObjectName("save_button")
         self.btn_save_profile.setFixedHeight(22)
@@ -3619,9 +3619,6 @@ except Exception as e:
         self.btn_save_profile.clicked.connect(self._save_profile_as)
         info_layout.addWidget(self.btn_save_profile)
 
-        # The current default (auto-load) profile is marked with a star
-        # directly in the combo box item text instead of a separate label
-        # (see _refresh_profile_list / _refresh_default_star).
         self.profile_combo = QComboBox()
         self.profile_combo.setFixedHeight(22)
         self.profile_combo.setMinimumWidth(150)
@@ -3629,21 +3626,14 @@ except Exception as e:
         info_layout.addWidget(self.profile_combo)
         layout.addWidget(info_group)
 
-        # Default/Delete toolbar: nvcurve's own `profile default` /
-        # `autoload` mechanism (see root_helper.py op_set_default_gpu_profile
-        # / op_run_gpu_autoload). No extra daemon/service — applied once at
-        # tray startup. "Default" is a toggle: click once to mark the
-        # selected profile as default (★ appears in the combo), click again
-        # on the same profile to unmark it.
+        # Profile toolbar
         profile_toolbar = QHBoxLayout()
         profile_toolbar.addStretch()
-
         self.btn_set_default_profile = QPushButton("⭐ Default")
         self.btn_set_default_profile.setFixedHeight(22)
         self.btn_set_default_profile.setFixedWidth(90)
         self.btn_set_default_profile.clicked.connect(self._toggle_default_gpu_profile)
         profile_toolbar.addWidget(self.btn_set_default_profile)
-
         self.btn_delete_profile = QPushButton("🗑 Delete")
         self.btn_delete_profile.setFixedHeight(22)
         self.btn_delete_profile.setFixedWidth(90)
@@ -3675,8 +3665,8 @@ except Exception as e:
         self.point_offset_spin.valueChanged.connect(self._on_point_offset_spin_changed)
         self.point_offset_spin.setEnabled(False)
 
-    for lbl in (self.point_index_label, self.point_voltage_label, self.point_freq_label, self.point_offset_label):
-        lbl.setFixedWidth(90)
+        for lbl in (self.point_index_label, self.point_voltage_label, self.point_freq_label, self.point_offset_label):
+                lbl.setFixedWidth(90)
 
         info_panel_layout.addWidget(self.point_index_label)
         info_panel_layout.addWidget(self.point_voltage_label)
@@ -3713,15 +3703,15 @@ except Exception as e:
         self.tgp_slider.setValue(130)
         self.tgp_slider.setFixedWidth(160)
         self.tgp_slider.setStyleSheet(
-            f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
-            f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
+                f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
+                f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
         )
 
         self.tgp_value_label = SL("130W", color=C_CYAN)
         self.tgp_value_label.setFixedWidth(40)
 
         self.tgp_slider.valueChanged.connect(
-            lambda v: self.tgp_value_label.setText(f"{v}W")
+                lambda v: self.tgp_value_label.setText(f"{v}W")
         )
 
         self.btn_apply_tgp = QPushButton("Apply")
@@ -3736,7 +3726,6 @@ except Exception as e:
 
         dual_panel_layout.addWidget(tgp_group, stretch=1)
 
-        # Ana layout'a yan yana paneli ekle
         layout.addLayout(dual_panel_layout)
 
         # V/F Curve
@@ -3791,12 +3780,9 @@ except Exception as e:
         control_layout.addWidget(self.mem_offset_spin)
         control_layout.addSpacing(15)
 
-        # VRAM locked-clock (max-frequency) lock — a separate NVML mechanism
-        # from the offset above: pins the memory clock to a fixed [min, max]
-        # MHz window instead of nudging the V/F curve (mirrors nvidia_oc's
-        # --min-mem-clock/--max-mem-clock). 0 = not set on either spin box.
+        # VRAM locked-clock (max-frequency) lock
         vram_lock_label = SL("VRAM Lock:", color=C_GREY)
-        control_layout.addWidget(vram_loinfo_panel.setAlignment(Qt.AlignLeft) ck_label)
+        control_layout.addWidget(vram_lock_label)
 
         self.vram_lock_min_spin = QSpinBox()
         self.vram_lock_min_spin.setRange(0, 20000)
@@ -3860,14 +3846,11 @@ except Exception as e:
         layout.addWidget(control_group)
         self.tabs.addTab(tab, "  🎮 GPU TUNING  ")
 
-        # B3: The GPU timer only runs while the GPU tab is visible.
-        # While on other tabs, the dGPU is allowed to drop into D3cold;
-        # NVML/nvidia-smi fork overhead also drops to zero.
+        # GPU timer
         self.gpu_info_timer = QTimer(self)
         self.gpu_info_timer.setInterval(2000)
         self.gpu_info_timer.timeout.connect(self._update_gpu_info)
-        # Connect the tab-change signal (once __init__ finishes, _connect_tab_timers is called)
-        self._gpu_tab_index = None   # _connect_tab_timers'ta doldurulacak
+        self._gpu_tab_index = None
 
     # ─── GPU TUNING METHODS ─────────────────────────────────────────────
 
