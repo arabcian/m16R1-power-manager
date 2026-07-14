@@ -30,8 +30,8 @@ else
     REAL_HOME=""
 fi
 
-APP_DIR="/usr/local/lib/ryzenadj-gui"
-BIN_DIR="/usr/local/bin"
+APP_DIR="/usr/lib/ryzenadj-gui"
+BIN_DIR="/usr/bin"
 PROFILES_DIR="/etc/ryzenadj-gui"
 VAR_DIR="/var/lib/ryzenadj-gui"
 RUN_DIR="/run/ryzenadj-gui"
@@ -52,6 +52,19 @@ rm -f "$DESKTOP_FILE"
 rm -rf "$RUN_DIR"
 ok "Uygulama kaldırıldı: $APP_DIR, launcher'lar, polkit action/rule, .desktop"
 
+# nvctgp (opsiyonel bileşen) — kuruluysa kaldır, kurulu değilse sessiz geç
+info "nvctgp bileşeni kaldırılıyor (varsa)..."
+if command -v rc-service >/dev/null 2>&1; then
+    rc-service nvctgpd stop 2>/dev/null || true
+    rc-update del nvctgpd default 2>/dev/null || true
+fi
+pkill -9 -f "/usr/sbin/nvctgpd" 2>/dev/null || true
+pkill -9 -f "inotifywait.*platform_profile" 2>/dev/null || true
+rm -f /usr/sbin/nvctgp /usr/sbin/nvctgpd
+rm -f /etc/init.d/nvctgpd
+rm -f /run/nvctgpd.pid
+ok "nvctgp kaldırıldı (kuruluysa)."
+
 if [ -n "$REAL_HOME" ] && [ -f "$REAL_HOME/.config/autostart/ryzenadj-tray.desktop" ]; then
     rm -f "$REAL_HOME/.config/autostart/ryzenadj-tray.desktop"
     ok "Tray autostart girişi kaldırıldı."
@@ -66,7 +79,9 @@ fi
 if [ "$PURGE" -eq 1 ]; then
     warn "--purge: güç profilleri ve script'ler de siliniyor..."
     rm -rf "$PROFILES_DIR" "$VAR_DIR"
+    rm -f /etc/conf.d/nvctgpd /var/log/nvctgpd.log
     ok "Profiller ve script'ler silindi: $PROFILES_DIR, $VAR_DIR"
+    ok "nvctgp yapılandırması da silindi: /etc/conf.d/nvctgpd"
     echo "  (nvcurve profilleri /etc/nvcurve/profiles bilerek dokunulmadan bırakıldı"
     echo "   — nvcurve ayrı bir bileşen olarak kabul edildi.)"
 else

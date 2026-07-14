@@ -6,10 +6,15 @@
 # Bu script, uygulamayı Linux Filesystem Hierarchy Standard (FHS)'e uygun,
 # kurulum yerinden bağımsız, merkezi sistem dizinlerine kurar:
 #
-#   /usr/local/lib/ryzenadj-gui/         uygulama kodu (Python, ikonlar, nvcurve/)
-#   /usr/local/lib/ryzenadj-gui/root_helper.py   (root:root, 0700 — ayrı kurulur)
-#   /usr/local/bin/ryzenadj-gui          başlatıcı (launcher)
-#   /usr/local/bin/ryzenadj-tray         başlatıcı (launcher)
+#   /usr/lib/ryzenadj-gui/               uygulama kodu (Python, ikonlar, nvcurve/)
+#   /usr/lib/ryzenadj-gui/root_helper.py         (root:root, 0700 — ayrı kurulur)
+#   /usr/bin/ryzenadj-gui                başlatıcı (launcher)
+#   /usr/bin/ryzenadj-tray               başlatıcı (launcher)
+#   /usr/sbin/nvctgp, /usr/sbin/nvctgpd  cTGP güç yöneticisi (opsiyonel)
+#
+# NOT: Uygulama /usr/local/... yollarını kaynak koda hardcode eder; bu script
+# dosyaları kurduktan SONRA sed ile kurulum diziniyle (/usr/lib, /usr/sbin)
+# hizalar — ebuild'in src_prepare'deki sed'iyle birebir aynı mantık.
 #   /etc/ryzenadj-gui/profiles/          güç profilleri (root_helper yazar, GUI okur)
 #   /etc/nvcurve/profiles/               nvcurve GPU V/F eğri profilleri
 #   /var/lib/ryzenadj-gui/scripts/       kalıcı, üretilmiş profil aktivasyon script'leri
@@ -121,8 +126,9 @@ ok "Bağımlılıklar tamam."
 # ─────────────────────────────────────────────────────────────────────────
 info "[2/8] Sistem dizinleri oluşturuluyor..."
 
-APP_DIR="/usr/local/lib/ryzenadj-gui"
-BIN_DIR="/usr/local/bin"
+APP_DIR="/usr/lib/ryzenadj-gui"
+BIN_DIR="/usr/bin"
+SBIN_DIR="/usr/sbin"
 PROFILES_DIR="/etc/ryzenadj-gui/profiles"
 NVCURVE_PROFILES_DIR="/etc/nvcurve/profiles"
 NVCURVE_SNAPSHOT_DIR="/var/cache/nvcurve/snapshots"
@@ -170,7 +176,15 @@ find "$APP_DIR/nvcurve" -type f -exec chmod 0644 {} \;
 # com.ryzenadj.gui.policy bu dosyayı auth_admin_keep_always ile eşleştirir;
 # 0700 + root sahipliği olmadan bu güven modeli GEÇERSİZ olur.
 install -o root -g root -m 0700 "$SOURCE_DIR/root_helper.py" "$APP_DIR/root_helper.py"
-ok "Uygulama dosyaları kuruldu: $APP_DIR"
+
+# Hardcoded /usr/local/lib path'lerini kurulum diziniyle hizala (ebuild ile aynı sed).
+# Kurulan KOPYALAR üzerinde çalışır — kaynak checkout kirlenmez.
+# (root_helper.py'deki referans yalnızca yorum, işleve etkisi yok — dokunulmadı.)
+sed -i "s|/usr/local/lib/ryzenadj-gui|$APP_DIR|g" \
+    "$APP_DIR/ryzenadj_gui.py" "$APP_DIR/ryzenadj_wrapper.py"
+# GUI'nin hardcode çağırdığı nvctgp yolunu /usr/sbin'e çevir
+sed -i "s|/usr/local/sbin/nvctgp|$SBIN_DIR/nvctgp|g" "$APP_DIR/ryzenadj_gui.py"
+ok "Uygulama dosyaları kuruldu ve path'ler $APP_DIR ile hizalandı."
 
 # ─────────────────────────────────────────────────────────────────────────
 # 6. Başlatıcılar (launchers)
@@ -197,6 +211,9 @@ ok "Başlatıcılar kuruldu: $BIN_DIR/ryzenadj-gui, $BIN_DIR/ryzenadj-tray"
 info "[5/8] Polkit yetkilendirmesi kuruluyor..."
 
 install -o root -g root -m 0644 "$SOURCE_DIR/com.ryzenadj.gui.policy" \
+    "$POLKIT_ACTIONS_DIR/com.ryzenadj.gui.policy"
+# Polkit .policy içindeki root_helper.py yolunu da kurulum diziniyle hizala
+sed -i "s|/usr/local/lib/ryzenadj-gui|$APP_DIR|g" \
     "$POLKIT_ACTIONS_DIR/com.ryzenadj.gui.policy"
 
 # Parolasız yetkilendirme için gerçek JS kuralı (bkz. dosyanın içindeki
@@ -310,6 +327,46 @@ EOF
     ok "Tray otomatik başlatma eklendi: $AUTOSTART_DIR/ryzenadj-tray.desktop"
 else
     warn "Tray otomatik başlatması atlandı (--no-autostart veya kullanıcı ev dizini bulunamadı)."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# Opsiyonel bileşen: nvctgp (GPU Configurable-TGP güç yöneticisi)
+# Repo kökünde nvctgp/ klasörü VARSA kurulur; YOKSA hiçbir şey yapılmaz
+# (sessizce atlanır, normal prosedür kesintisiz devam eder).
+# GUI kaynak kodda /usr/local/sbin/nvctgp'yi çağırır; yukarıda bu yol
+# $SBIN_DIR/nvctgp (/usr/sbin) olacak şekilde sed'lendiği için buraya kuruyoruz.
+# ─────────────────────────────────────────────────────────────────────────
+if [ -d "$SOURCE_DIR/nvctgp" ]; then
+    info "[nvctgp] cTGP güç yöneticisi bulundu, kuruluyor..."
+
+    # SBIN_DIR global olarak /usr/sbin (ebuild ile aynı düzen)
+    install -d -o root -g root -m 0755 "$SBIN_DIR"
+
+    NVCTGP_OK=0
+    [ -f "$SOURCE_DIR/nvctgp/nvctgp" ]  && { install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgp"  "$SBIN_DIR/nvctgp";  NVCTGP_OK=1; }
+    [ -f "$SOURCE_DIR/nvctgp/nvctgpd" ] && { install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgpd" "$SBIN_DIR/nvctgpd"; }
+
+    # OpenRC init script + conf.d (yalnızca OpenRC anlamlı; dosya varsa kurulur)
+    if [ -f "$SOURCE_DIR/nvctgp/nvctgpd.initd" ]; then
+        install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgpd.initd" /etc/init.d/nvctgpd
+        # conf.d yalnızca YOKSA yazılır → kullanıcının WATTS ayarı korunur
+        if [ ! -f /etc/conf.d/nvctgpd ]; then
+            echo 'WATTS=175' > /etc/conf.d/nvctgpd
+            chmod 0644 /etc/conf.d/nvctgpd
+        fi
+    fi
+
+    if [ "$NVCTGP_OK" -eq 1 ]; then
+        ok "nvctgp kuruldu: $SBIN_DIR/nvctgp (+ nvctgpd, initd, conf.d)"
+        echo "     • Gerekli: 'acpi_call' çekirdek modülü (sudo modprobe acpi_call)."
+        if command -v rc-update >/dev/null 2>&1; then
+            echo "     • Boot'ta sabitlemek için:"
+            echo "         sudo rc-update add nvctgpd default && sudo rc-service nvctgpd start"
+            echo "     • Watt tavanı: /etc/conf.d/nvctgpd içindeki WATTS= (125-175)."
+        fi
+    else
+        warn "nvctgp/ klasörü var ama içinde 'nvctgp' betiği yok — atlandı."
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
