@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# /etc/init.d/nvctgpd  (Gentoo/OpenRC)
+# Config: /etc/conf.d/nvctgpd  ->  WATTS=175
+description="Pin GPU Configurable-TGP ceiling via EC table"
+
+: ${WATTS:=175}
+command="/usr/local/sbin/nvctgpd"
+command_args="${WATTS}"
+command_background=true
+pidfile="/run/nvctgpd.pid"
+output_log="/var/log/nvctgpd.log"
+error_log="/var/log/nvctgpd.log"
+
+depend() {
+    after nvidia-powerd dbus modules
+}

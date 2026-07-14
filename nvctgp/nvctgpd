@@ -1,0 +1,26 @@
+#!/bin/bash
+# nvctgpd <watt> — cTGP tavanini profil/AC/resume resetlerine karsi sabit tut.
+#   platform_profile degisince (veya periyodik) EC tablosunu SMM defaulta cevirir;
+#   bu daemon her tetiginde nvctgp'yi tekrar uygular.
+#   inotify varsa profil degisiminde ~anlik, yoksa 10sn periyodik guvenlik agi.
+set -uo pipefail
+
+W=${1:?kullanim: nvctgpd <watt 125-175>}
+DIR=$(dirname "$(readlink -f "$0")")
+PP=/sys/firmware/acpi/platform_profile
+
+apply(){ "$DIR/nvctgp" "$W" >/dev/null 2>&1 && logger -t nvctgpd "pinned ${W}W" \
+                                            || logger -t nvctgpd "apply FAILED"; }
+trap 'exit 0' INT TERM
+
+apply
+while :; do
+  if command -v inotifywait >/dev/null 2>&1 && [[ -e $PP ]]; then
+    # profil degisiminde uyan, degismezse 10sn'de bir yine de gec
+    inotifywait -qq -t 10 -e modify "$PP" 2>/dev/null || true
+  else
+    sleep 10
+  fi
+  sleep 1          # SMM tabloyu yeniden yazsin, sonra biz uzerine yazalim
+  apply
+done
