@@ -815,6 +815,52 @@ def op_reset_gpu_curve(params: dict) -> dict:
     return {"ok": True, "message": "Reset successful."}
 
 
+def op_set_vram_memlock(params: dict) -> dict:
+    """VRAM'i (bellek clock) sabit bir [min, max] MHz penceresine kilitler.
+
+    mem_offset_mhz'den (VF eğrisine delta ekleyen) farklı bir mekanizma:
+    nvcurve'un `memlock set` alt komutu üzerinden NVML'in
+    nvmlDeviceSetMemoryLockedClocks çağrısını tetikler (nvidia_oc'nin
+    --min-mem-clock/--max-mem-clock ile aynı mekanizma).
+    """
+    project_dir = params.get("project_dir")
+    min_mhz = params.get("min_mhz")
+    max_mhz = params.get("max_mhz")
+
+    if not isinstance(min_mhz, int) or not isinstance(max_mhz, int):
+        return {"ok": False, "error": "min_mhz/max_mhz must be integers"}
+    if min_mhz <= 0 or max_mhz <= 0 or min_mhz > max_mhz:
+        return {"ok": False, "error": "Invalid min_mhz/max_mhz range"}
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nvcurve", "memlock", "set",
+         "--min", str(min_mhz), "--max", str(max_mhz)],
+        capture_output=True, text=True, env=env, cwd=project_dir,
+    )
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or "nvcurve memlock set failed"}
+    return {"ok": True, "message": result.stdout.strip() or f"VRAM locked to {min_mhz}-{max_mhz} MHz."}
+
+
+def op_reset_vram_memlock(params: dict) -> dict:
+    """VRAM locked-clock kilidini kaldırır (nvcurve `memlock reset`)."""
+    project_dir = params.get("project_dir")
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nvcurve", "memlock", "reset"],
+        capture_output=True, text=True, env=env, cwd=project_dir,
+    )
+    if result.returncode != 0:
+        return {"ok": False, "error": result.stderr.strip() or "nvcurve memlock reset failed"}
+    return {"ok": True, "message": result.stdout.strip() or "VRAM clock unlocked."}
+
+
 def op_apply_cpu_isolation(params: dict) -> dict:
     """redirect-tasks.sh'nin Python karşılığı. cgroup v2 CCX izolasyonunu uygular."""
     import glob
@@ -1178,6 +1224,8 @@ OPERATIONS = {
     "read_gpu_curve": op_read_gpu_curve,
     "apply_gpu_offsets": op_apply_gpu_offsets,
     "reset_gpu_curve": op_reset_gpu_curve,
+    "set_vram_memlock": op_set_vram_memlock,
+    "reset_vram_memlock": op_reset_vram_memlock,
     "run_script_content": op_run_script_content,
     "read_gaming_status": op_read_gaming_status,
 

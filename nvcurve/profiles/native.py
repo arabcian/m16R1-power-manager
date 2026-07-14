@@ -14,6 +14,8 @@ class ProfileData:
     curve_deltas: Dict[str, int]  # { "index": delta_khz }
     mem_offset_mhz: Optional[int] = None
     power_limit_w: Optional[int] = None
+    mem_locked_min_mhz: Optional[int] = None
+    mem_locked_max_mhz: Optional[int] = None
 
 
 def save_profile(profile_dir: str, data: ProfileData) -> str:

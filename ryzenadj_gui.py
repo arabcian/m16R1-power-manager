@@ -3737,6 +3737,54 @@ except Exception as e:
         self.mem_offset_spin.setFixedWidth(100)
         control_layout.addWidget(mem_label)
         control_layout.addWidget(self.mem_offset_spin)
+        control_layout.addSpacing(15)
+
+        # VRAM locked-clock (max-frequency) lock — a separate NVML mechanism
+        # from the offset above: pins the memory clock to a fixed [min, max]
+        # MHz window instead of nudging the V/F curve (mirrors nvidia_oc's
+        # --min-mem-clock/--max-mem-clock). 0 = not set on either spin box.
+        vram_lock_label = SL("VRAM Lock:", color=C_GREY)
+        control_layout.addWidget(vram_lock_label)
+
+        self.vram_lock_min_spin = QSpinBox()
+        self.vram_lock_min_spin.setRange(0, 20000)
+        self.vram_lock_min_spin.setSpecialValueText("–")
+        self.vram_lock_min_spin.setValue(0)
+        self.vram_lock_min_spin.setSuffix(" MHz")
+        self.vram_lock_min_spin.setFixedHeight(25)
+        self.vram_lock_min_spin.setFixedWidth(85)
+        self.vram_lock_min_spin.setToolTip("Min memory clock (MHz). Left at 0 → uses Max for both.")
+        control_layout.addWidget(self.vram_lock_min_spin)
+
+        dash_label = SL("–", color=C_GREY)
+        control_layout.addWidget(dash_label)
+
+        self.vram_lock_max_spin = QSpinBox()
+        self.vram_lock_max_spin.setRange(0, 20000)
+        self.vram_lock_max_spin.setSpecialValueText("–")
+        self.vram_lock_max_spin.setValue(0)
+        self.vram_lock_max_spin.setSuffix(" MHz")
+        self.vram_lock_max_spin.setFixedHeight(25)
+        self.vram_lock_max_spin.setFixedWidth(85)
+        self.vram_lock_max_spin.setToolTip("Max memory clock (MHz) — the actual lock target.")
+        control_layout.addWidget(self.vram_lock_max_spin)
+
+        self.btn_vram_lock = QPushButton("🔒")
+        self.btn_vram_lock.setObjectName("run_button")
+        self.btn_vram_lock.setFixedHeight(22)
+        self.btn_vram_lock.setFixedWidth(30)
+        self.btn_vram_lock.setToolTip("Lock VRAM clock to Min–Max now (nvmlDeviceSetMemoryLockedClocks)")
+        self.btn_vram_lock.clicked.connect(self._apply_vram_memlock)
+        control_layout.addWidget(self.btn_vram_lock)
+
+        self.btn_vram_unlock = QPushButton("🔓")
+        self.btn_vram_unlock.setObjectName("stop_button")
+        self.btn_vram_unlock.setFixedHeight(22)
+        self.btn_vram_unlock.setFixedWidth(30)
+        self.btn_vram_unlock.setToolTip("Unlock VRAM clock — return to driver/P-state control")
+        self.btn_vram_unlock.clicked.connect(self._reset_vram_memlock)
+        control_layout.addWidget(self.btn_vram_unlock)
+
         control_layout.addStretch()
 
         self.btn_read_curve = QPushButton("📥 Read Current Curve")
@@ -4723,6 +4771,11 @@ except Exception as e:
             self._log("No offsets to apply.")
             return
 
+        vram_lock_max = self.vram_lock_max_spin.value()
+        vram_lock_min = self.vram_lock_min_spin.value()
+        if vram_lock_max != 0 and vram_lock_min == 0:
+            vram_lock_min = vram_lock_max
+
         profile_data = {
             "name": profile_name,
             "gpu_name": "NVIDIA GeForce RTX 4080 Laptop GPU",
@@ -4732,7 +4785,9 @@ except Exception as e:
             # unnecessary NVML mem-offset call, which crashed the whole
             # apply with a permission error on some drivers.
             "mem_offset_mhz": mem_off if mem_off != 0 else None,
-            "power_limit_w": None
+            "power_limit_w": None,
+            "mem_locked_min_mhz": vram_lock_min if vram_lock_max != 0 else None,
+            "mem_locked_max_mhz": vram_lock_max if vram_lock_max != 0 else None,
         }
 
         project_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4772,6 +4827,65 @@ except Exception as e:
         self._core_offset = 0
         self.core_offset_spin.setValue(0)
         self.mem_offset_spin.setValue(0)
+        self.vram_lock_min_spin.setValue(0)
+        self.vram_lock_max_spin.setValue(0)
+
+    # ─── GPU TUNING: VRAM LOCKED CLOCKS (max-frequency lock) ─────────────
+    # Separate NVML mechanism from the Memory Offset spin above — pins the
+    # memory clock to a fixed [min, max] MHz window instead of nudging the
+    # V/F curve (see nvcurve hal/limits.py set_mem_locked_clocks / nvidia_oc's
+    # --min-mem-clock/--max-mem-clock). Applied immediately, independent of
+    # the curve Apply/Reset buttons.
+    def _apply_vram_memlock(self):
+        max_mhz = self.vram_lock_max_spin.value()
+        min_mhz = self.vram_lock_min_spin.value()
+        if max_mhz == 0:
+            self._log("⚠️ Enter a Max MHz value first (Min defaults to Max if left at 0).")
+            return
+        if min_mhz == 0:
+            min_mhz = max_mhz
+        if min_mhz > max_mhz:
+            self._log("⚠️ VRAM Lock: Min cannot be greater than Max.")
+            return
+
+        self.btn_vram_lock.setEnabled(False)
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+
+        payload = {
+            "op": "set_vram_memlock",
+            "project_dir": project_dir,
+            "min_mhz": min_mhz,
+            "max_mhz": max_mhz,
+        }
+
+        def done(_output):
+            self.btn_vram_lock.setEnabled(True)
+
+        self._run_root_helper_command(
+            payload,
+            f"VRAM locked to {min_mhz}–{max_mhz} MHz.",
+            "Failed to lock VRAM clock.",
+            callback=done,
+        )
+
+    def _reset_vram_memlock(self):
+        self.btn_vram_unlock.setEnabled(False)
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+
+        payload = {
+            "op": "reset_vram_memlock",
+            "project_dir": project_dir,
+        }
+
+        def done(_output):
+            self.btn_vram_unlock.setEnabled(True)
+
+        self._run_root_helper_command(
+            payload,
+            "VRAM clock unlocked.",
+            "Failed to unlock VRAM clock.",
+            callback=done,
+        )
 
     def _on_save_finished(self, output, tmp_path, script_path, name_clean):
         try:
@@ -4993,6 +5107,13 @@ except Exception as e:
         self.mem_offset_spin.setValue(mem_offset)
         self.mem_offset_spin.blockSignals(False)
 
+        self.vram_lock_min_spin.blockSignals(True)
+        self.vram_lock_max_spin.blockSignals(True)
+        self.vram_lock_min_spin.setValue(data.get('mem_locked_min_mhz') or 0)
+        self.vram_lock_max_spin.setValue(data.get('mem_locked_max_mhz') or 0)
+        self.vram_lock_min_spin.blockSignals(False)
+        self.vram_lock_max_spin.blockSignals(False)
+
         self._read_core_offset = self._core_offset
         self._read_offsets = self._point_offsets.copy() if self._point_offsets else {}
 
@@ -5029,12 +5150,18 @@ except Exception as e:
         if mem_off != 0:
             offsets['131'] = mem_off * 1000
             offsets['132'] = mem_off * 1000
+        vram_lock_max = self.vram_lock_max_spin.value()
+        vram_lock_min = self.vram_lock_min_spin.value()
+        if vram_lock_max != 0 and vram_lock_min == 0:
+            vram_lock_min = vram_lock_max
         return {
             "name": "custom",
             "gpu_name": "NVIDIA GeForce RTX 4080 Laptop GPU",
             "curve_deltas": offsets,
             "mem_offset_mhz": mem_off,
-            "power_limit_w": None
+            "power_limit_w": None,
+            "mem_locked_min_mhz": vram_lock_min if vram_lock_max != 0 else None,
+            "mem_locked_max_mhz": vram_lock_max if vram_lock_max != 0 else None,
         }
 
     # ─── GPU DEFAULT PROFILE (auto-applied by the tray at boot) ────────

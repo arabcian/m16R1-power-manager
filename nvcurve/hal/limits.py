@@ -319,3 +319,96 @@ def get_mem_offset_range(gpu_index: int = 0) -> dict:
     return out
 
 
+# ── Memory locked clocks (VRAM max-frequency lock) ────────────────────────────
+#
+# This is a *different* mechanism from the VF-curve mem offset above. The
+# offset (set_clock_offsets) nudges every point of the existing V/F curve by a
+# delta and still lets the driver pick a P-state/clock dynamically. This one —
+# mirroring nvidia_oc's `--min-mem-clock/--max-mem-clock` (which calls NVML's
+# `device.set_mem_locked_clocks`) — pins the memory clock to a fixed [min, max]
+# MHz window via nvmlDeviceSetMemoryLockedClocks, overriding P-state-driven
+# down-clocking entirely. Passing min == max (e.g. the highest supported clock
+# from get_max_mem_clock) is what gives "VRAM always at max frequency" behavior.
+# nvmlDeviceResetMemoryLockedClocks hands control back to the driver.
+
+def get_supported_mem_clocks(gpu_index: int = 0) -> list[int]:
+    """Return the memory clocks (MHz) the driver reports as supported, ascending.
+
+    Uses nvmlDeviceGetSupportedMemoryClocks. Empty list on failure/unavailable.
+    """
+    if not _NVML_AVAILABLE:
+        return []
+    try:
+        handle = _get_handle(gpu_index)
+        clocks = pynvml.nvmlDeviceGetSupportedMemoryClocks(handle)
+        return sorted(int(c) for c in clocks)
+    except Exception as exc:
+        log.debug("get_supported_mem_clocks: %s", exc)
+        return []
+
+
+def get_max_mem_clock(gpu_index: int = 0) -> Optional[int]:
+    """Return the highest memory clock (MHz) the driver reports as supported.
+
+    None if the list can't be read (e.g. NVML unavailable or unsupported GPU).
+    """
+    clocks = get_supported_mem_clocks(gpu_index)
+    return clocks[-1] if clocks else None
+
+
+def set_mem_locked_clocks(min_mhz: int, max_mhz: int, gpu_index: int = 0) -> tuple[bool, str]:
+    """Lock the memory clock to the [min_mhz, max_mhz] MHz window.
+
+    Uses nvmlDeviceSetMemoryLockedClocks (the same NVML call nvidia_oc's
+    `--min-mem-clock/--max-mem-clock` drives). Pass min_mhz == max_mhz to pin
+    the clock to a single fixed frequency.
+    """
+    if not _NVML_AVAILABLE:
+        return False, "NVML not available (install nvidia-ml-py)"
+    try:
+        handle = _get_handle(gpu_index)
+
+        fn = getattr(pynvml, "nvmlDeviceSetMemoryLockedClocks", None)
+        if fn is not None:
+            fn(handle, int(min_mhz), int(max_mhz))
+            return True, "OK"
+
+        fn = _try_nvml_fn("nvmlDeviceSetMemoryLockedClocks")
+        if fn is None:
+            return False, "nvmlDeviceSetMemoryLockedClocks not found in libnvidia-ml"
+        rc = fn(handle, ctypes.c_uint(int(min_mhz)), ctypes.c_uint(int(max_mhz)))
+        if rc != 0:
+            return False, f"NVML error code: {rc}"
+        return True, "OK"
+    except Exception as exc:
+        log.warning("set_mem_locked_clocks: %s", exc)
+        return False, str(exc)
+
+
+def reset_mem_locked_clocks(gpu_index: int = 0) -> tuple[bool, str]:
+    """Undo set_mem_locked_clocks, returning the memory clock to driver/P-state control.
+
+    Uses nvmlDeviceResetMemoryLockedClocks.
+    """
+    if not _NVML_AVAILABLE:
+        return False, "NVML not available (install nvidia-ml-py)"
+    try:
+        handle = _get_handle(gpu_index)
+
+        fn = getattr(pynvml, "nvmlDeviceResetMemoryLockedClocks", None)
+        if fn is not None:
+            fn(handle)
+            return True, "OK"
+
+        fn = _try_nvml_fn("nvmlDeviceResetMemoryLockedClocks")
+        if fn is None:
+            return False, "nvmlDeviceResetMemoryLockedClocks not found in libnvidia-ml"
+        rc = fn(handle)
+        if rc != 0:
+            return False, f"NVML error code: {rc}"
+        return True, "OK"
+    except Exception as exc:
+        log.warning("reset_mem_locked_clocks: %s", exc)
+        return False, str(exc)
+
+

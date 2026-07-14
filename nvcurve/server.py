@@ -41,6 +41,9 @@ from .hal.limits import (
     get_clock_offsets,
     set_clock_offsets,
     get_mem_offset_range,
+    get_max_mem_clock,
+    set_mem_locked_clocks,
+    reset_mem_locked_clocks,
 )
 from .profiles.native import (
     ProfileData,
@@ -293,6 +296,11 @@ class SnapshotRestoreRequest(BaseModel):
 class LimitsRequest(BaseModel):
     power_limit_w: int | None = None
     mem_offset_mhz: int | None = None
+    # VRAM locked-clock (max-frequency) window — a separate mechanism from
+    # mem_offset_mhz above; see hal/limits.py set_mem_locked_clocks.
+    mem_locked_min_mhz: int | None = None
+    mem_locked_max_mhz: int | None = None
+    mem_locked_reset: bool = False
 
 
 class ProfileSaveRequest(BaseModel):
@@ -510,12 +518,30 @@ async def api_profile_save(req: ProfileSaveRequest, gpu_index: int = 0):
         power_limit_w = None
         mem_offset_mhz = None
 
+    # NVML has no query for the currently-applied memory locked-clock range, so
+    # carry it forward from an existing profile of the same name instead of
+    # silently dropping it on re-save.
+    mem_locked_min_mhz = None
+    mem_locked_max_mhz = None
+    import os as _os
+    existing_path = _os.path.join(cfg.profile_dir,
+                                   "".join(c for c in req.name if c.isalnum() or c in " _-()").strip() + ".json")
+    if _os.path.exists(existing_path):
+        try:
+            existing = await _run(load_profile, existing_path)
+            mem_locked_min_mhz = existing.mem_locked_min_mhz
+            mem_locked_max_mhz = existing.mem_locked_max_mhz
+        except Exception:
+            pass
+
     data = ProfileData(
         name=req.name,
         gpu_name=g_state["gpu_name"],
         curve_deltas=curve_deltas,
         mem_offset_mhz=mem_offset_mhz,
         power_limit_w=power_limit_w,
+        mem_locked_min_mhz=mem_locked_min_mhz,
+        mem_locked_max_mhz=mem_locked_max_mhz,
     )
     filepath = await _run(save_profile, cfg.profile_dir, data)
     g_state["active_profile"] = req.name
@@ -609,6 +635,12 @@ async def _apply_profile(name: str, gpu_index: int = 0) -> list[str]:
         ok, msg = await _run(set_power_limit, profile.power_limit_w, gpu_index)
         if not ok:
             errs.append(f"Power limit: {msg}")
+
+    if profile.mem_locked_max_mhz is not None:
+        min_mhz = profile.mem_locked_min_mhz if profile.mem_locked_min_mhz is not None else profile.mem_locked_max_mhz
+        ok, msg = await _run(set_mem_locked_clocks, min_mhz, profile.mem_locked_max_mhz, gpu_index)
+        if not ok:
+            errs.append(f"Mem locked clocks: {msg}")
 
     # Apply curve deltas (after mem offset which may have wiped them).
     async with g_state["write_lock"]:
@@ -715,10 +747,15 @@ async def api_limits(gpu_index: int = 0):
     power = await _run(get_power_limit, gpu_index)
     offsets = await _run(get_clock_offsets, gpu_index)
     mem_off_range = await _run(get_mem_offset_range, gpu_index)
+    max_mem_clock_mhz = await _run(get_max_mem_clock, gpu_index)
     return {
         **power,
         **offsets,           # gpc_offset_mhz, mem_offset_mhz
         **mem_off_range,     # min_mem_offset_mhz, max_mem_offset_mhz
+        # Highest memory clock (MHz) the driver reports as legal to lock to via
+        # mem_locked_max_mhz below. NVML has no query for whether a lock is
+        # currently active or what range it covers.
+        "max_mem_clock_mhz": max_mem_clock_mhz,
     }
 
 
@@ -741,6 +778,16 @@ async def api_limits_update(req: LimitsRequest, gpu_index: int = 0):
             # Setting mem offset may reset the GPC/curve table as a driver side-effect.
             # Re-apply the last known curve offsets to restore them.
             await _reapply_curve(gpu_index)
+
+    if req.mem_locked_reset:
+        ok, msg = await _run(reset_mem_locked_clocks, gpu_index)
+        if not ok:
+            errs.append(f"Mem Locked Clocks: {msg}")
+    elif req.mem_locked_max_mhz is not None:
+        min_mhz = req.mem_locked_min_mhz if req.mem_locked_min_mhz is not None else req.mem_locked_max_mhz
+        ok, msg = await _run(set_mem_locked_clocks, min_mhz, req.mem_locked_max_mhz, gpu_index)
+        if not ok:
+            errs.append(f"Mem Locked Clocks: {msg}")
 
     if errs:
         raise HTTPException(status_code=500, detail="; ".join(errs))
@@ -806,6 +853,10 @@ async def api_limits_reset(gpu_index: int = 0):
         errs.append(f"Mem Offset: {msg}")
     else:
         await _reapply_curve(gpu_index)
+
+    ok, msg = await _run(reset_mem_locked_clocks, gpu_index)
+    if not ok:
+        errs.append(f"Mem Locked Clocks: {msg}")
 
     if errs:
         raise HTTPException(status_code=500, detail="; ".join(errs))

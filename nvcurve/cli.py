@@ -8,6 +8,10 @@ Normal use:
     nvcurve snapshot [save|restore|list]           Manage snapshots
     nvcurve gpus                                   List detected NVIDIA GPUs
     nvcurve profile [save|apply|list|default]      Manage profiles
+    nvcurve memlock status                         Show supported memory clock range
+    nvcurve memlock set --to-max                   Lock VRAM to its max supported frequency
+    nvcurve memlock set --max N [--min N]          Lock VRAM to a fixed MHz window
+    nvcurve memlock reset                          Unlock VRAM (return to driver/P-state control)
 
 Web server (on-demand, for the GUI):
     nvcurve serve start [--detach]                 Start web server (escalates to root)
@@ -1047,12 +1051,31 @@ def cmd_profile(args):
             power_limit_w = None
             mem_offset_mhz = None
 
+        # NVML has no query for the currently-applied memory locked-clock range
+        # (unlike power limit / clock offsets, which are read back from hardware
+        # above), so carry it forward from an existing profile of the same name
+        # rather than silently dropping it on re-save.
+        mem_locked_min_mhz = None
+        mem_locked_max_mhz = None
+        safe_name = "".join(c for c in args.name if c.isalnum() or c in " _-()").strip()
+        existing_path = _os.path.join(default_config.profile_dir, f"{safe_name}.json")
+        if _os.path.exists(existing_path):
+            try:
+                from .profiles.native import load_profile as _load_profile
+                existing = _load_profile(existing_path)
+                mem_locked_min_mhz = existing.mem_locked_min_mhz
+                mem_locked_max_mhz = existing.mem_locked_max_mhz
+            except Exception:
+                pass
+
         data = ProfileData(
             name=args.name,
             gpu_name=gpu_name,
             curve_deltas=curve_deltas,
             mem_offset_mhz=mem_offset_mhz,
             power_limit_w=power_limit_w,
+            mem_locked_min_mhz=mem_locked_min_mhz,
+            mem_locked_max_mhz=mem_locked_max_mhz,
         )
         filepath = save_profile(default_config.profile_dir, data)
         print(f"Saved profile '{args.name}' to {filepath}")
@@ -1064,7 +1087,7 @@ def cmd_profile(args):
         require_root()
         import os as _os
         from .hal.gpu import get_gpu
-        from .hal.limits import set_clock_offsets, set_power_limit
+        from .hal.limits import set_clock_offsets, set_power_limit, set_mem_locked_clocks
         from .hal.vfcurve import write_offsets, reset_offsets
         from .hal.snapshot import save as snapshot_save
         from .profiles.native import load_profile
@@ -1099,6 +1122,14 @@ def cmd_profile(args):
             ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
             if not ok:
                 warnings.append(f"Power limit: {msg}")
+
+        if profile.mem_locked_max_mhz is not None:
+            min_mhz = profile.mem_locked_min_mhz
+            if min_mhz is None:
+                min_mhz = profile.mem_locked_max_mhz
+            ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
+            if not ok:
+                warnings.append(f"Mem locked clocks: {msg}")
 
         if profile.curve_deltas:
             deltas = {int(k): v for k, v in profile.curve_deltas.items()}
@@ -1144,6 +1175,69 @@ def cmd_gpus(args):
         pci = g.get("pci_bus_id")
         pci_str = f"PCI 0x{pci:04x}" if pci is not None else "PCI N/A"
         print(f"  [{g['index']}] {g['name']}  —  {uuid}  —  {pci_str}")
+
+
+def cmd_memlock(args):
+    """Get/set/reset the memory locked-clocks window (VRAM max-frequency lock).
+
+    Unlike `write` (VF-curve offsets, NvAPI), this pins the memory clock to a
+    fixed [min, max] MHz window via NVML — the same mechanism as nvidia_oc's
+    `--min-mem-clock/--max-mem-clock`. It bypasses driver P-state down-clocking
+    entirely rather than nudging the existing curve.
+    """
+    from .hal.limits import (
+        get_supported_mem_clocks, get_max_mem_clock,
+        set_mem_locked_clocks, reset_mem_locked_clocks,
+    )
+
+    gpu_index = getattr(args, "gpu_index", 0)
+    action = args.action
+
+    if action == "status":
+        clocks = get_supported_mem_clocks(gpu_index)
+        if not clocks:
+            print("Supported memory clocks: unavailable (NVML not initialized or unsupported GPU)")
+        else:
+            print(f"Supported memory clocks: {clocks[0]}–{clocks[-1]} MHz "
+                  f"({len(clocks)} steps)")
+        print("Note: NVML does not expose whether a lock is currently active or its range;")
+        print("this only reports what values are legal to lock to.")
+        return
+
+    if action == "reset":
+        require_root()
+        ok, msg = reset_mem_locked_clocks(gpu_index)
+        if not ok:
+            print(f"Error: {msg}", file=sys.stderr)
+            sys.exit(1)
+        print("Memory clock unlocked (returned to driver/P-state control).")
+        return
+
+    if action == "set":
+        require_root()
+        to_max = getattr(args, "to_max", False)
+        max_mhz = getattr(args, "max", None)
+        min_mhz = getattr(args, "min", None)
+
+        if to_max:
+            max_mhz = get_max_mem_clock(gpu_index)
+            if max_mhz is None:
+                print("Error: could not determine max supported memory clock "
+                      "(NVML unavailable or unsupported GPU)", file=sys.stderr)
+                sys.exit(1)
+        elif max_mhz is None:
+            print("Error: --max <MHz> or --to-max is required", file=sys.stderr)
+            sys.exit(2)
+
+        if min_mhz is None:
+            min_mhz = max_mhz  # pin to a single fixed frequency by default
+
+        ok, msg = set_mem_locked_clocks(min_mhz, max_mhz, gpu_index)
+        if not ok:
+            print(f"Error: {msg}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Memory clock locked to {min_mhz}–{max_mhz} MHz.")
+        return
 
 
 def cmd_setup(args):
@@ -1611,6 +1705,8 @@ Examples:
   %(prog)s profile save balanced         Save current state as profile
   %(prog)s profile apply balanced        Apply saved profile (escalates to root)
   %(prog)s profile default balanced      Set profile to auto-load on daemon start
+  %(prog)s memlock set --to-max          Lock VRAM to its max supported frequency
+  %(prog)s memlock reset                 Unlock VRAM (return to driver control)
   %(prog)s serve start --detach          Start web server in background
   %(prog)s serve stop                    Stop running web server
   %(prog)s service install               Register daemon as systemd service (recommended)
@@ -1696,6 +1792,20 @@ Examples:
     p_prof.add_argument("name", nargs="?", help="Profile name (for save/apply/default)")
     p_prof.add_argument("--clear", action="store_true", help="Clear the default profile (for default action)")
     p_prof.set_defaults(func=cmd_profile)
+
+    # memlock
+    p_memlock = sub.add_parser("memlock",
+                                help="VRAM locked-clock (max-frequency) control (server-optional)",
+                                parents=[gflags])
+    p_memlock.set_defaults(func=cmd_memlock)
+    p_memlock.add_argument("action", choices=["status", "set", "reset"])
+    p_memlock.add_argument("--max", type=int, default=None, metavar="MHz",
+                            help="Lock max memory clock to this frequency (MHz)")
+    p_memlock.add_argument("--min", type=int, default=None, metavar="MHz",
+                            help="Lock min memory clock to this frequency (MHz); "
+                                 "defaults to --max (pins to a single fixed frequency)")
+    p_memlock.add_argument("--to-max", dest="to_max", action="store_true",
+                            help="Lock to the highest memory clock the driver reports as supported")
 
     # daemon
     sub.add_parser("daemon", help="Run the nvcurve daemon (apply auto-load profiles, requires root)",

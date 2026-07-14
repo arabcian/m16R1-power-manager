@@ -23,7 +23,7 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
     """Apply a named profile to the given GPU. Returns a list of error strings."""
     from .native import load_profile
     from ..hal.gpu import get_gpu
-    from ..hal.limits import set_clock_offsets, set_power_limit
+    from ..hal.limits import set_clock_offsets, set_power_limit, set_mem_locked_clocks
     from ..hal.vfcurve import write_offsets, reset_offsets
     from ..hal.snapshot import save as snapshot_save
     from ..safety import validate_write
@@ -46,6 +46,14 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
         ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
         if not ok:
             errs.append(f"Power limit: {msg}")
+
+    if profile.mem_locked_max_mhz is not None:
+        min_mhz = profile.mem_locked_min_mhz
+        if min_mhz is None:
+            min_mhz = profile.mem_locked_max_mhz
+        ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
+        if not ok:
+            errs.append(f"Mem locked clocks: {msg}")
 
     if profile.curve_deltas:
         deltas = {int(k): v for k, v in profile.curve_deltas.items()}
