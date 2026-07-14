@@ -3710,8 +3710,21 @@ except Exception as e:
         # ==========================================
         # 2. BÖLÜM: GPU TGP (130W - 175W)
         # ==========================================
-        lbl_tgp = SL("TGP:", color=C_GREY)
 
+        g_ctdp = QGroupBox(" cTDP ")
+
+        # Başlığı sol üste (top left) taşır ve boşlukları ayarlar
+        g_ctdp.setStyleSheet("""
+            QGroupBox {
+                margin-top: 1.5ex; /* Kutu içeriğinin başlıkla çakışmaması için üst boşluk */
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left; /* Başlığı tam sol üste sabitler */
+                padding: 0 5px; /* Yazının sağından solundan 5px boşluk bırakır (çizgiyi keser) */
+                left: 10px; /* Soldan ne kadar içeride başlayacağını piksel olarak belirler */
+            }
+        """)
         self.tgp_slider = QSlider(Qt.Horizontal)
         self.tgp_slider.setRange(130, 175)
         self.tgp_slider.setValue(130)
@@ -3729,7 +3742,6 @@ except Exception as e:
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
-        info_panel_layout.addWidget(lbl_tgp)
         info_panel_layout.addWidget(self.tgp_slider)
         info_panel_layout.addWidget(self.tgp_value_label)
         info_panel_layout.addWidget(self.btn_apply_tgp)
