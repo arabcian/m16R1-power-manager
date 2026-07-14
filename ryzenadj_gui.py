@@ -3692,18 +3692,25 @@ except Exception as e:
 
         dual_panel_layout.addWidget(info_panel, stretch=2)  # info panel daha geniş
 
-        # 2) cTGP (sağda, dar) - slider + yanında apply
+        # 2) cTGP (sağda, dar) – slider genişleyip Apply'a kadar uzansın
         tgp_group = QGroupBox(" cTGP ")
         tgp_layout = QHBoxLayout(tgp_group)
         tgp_layout.setContentsMargins(8, 6, 8, 6)
         tgp_layout.setSpacing(4)
+
+        # Slider + etiketi saran genişleyebilir konteyner
+        slider_container = QWidget()
+        slider_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        slider_inner_layout = QHBoxLayout(slider_container)
+        slider_inner_layout.setContentsMargins(0, 0, 0, 0)
+        slider_inner_layout.setSpacing(4)
 
         self.tgp_slider = QSlider(Qt.Horizontal)
         self.tgp_slider.setRange(130, 175)
         self.tgp_slider.setValue(130)
         self.tgp_slider.setSingleStep(5)
         self.tgp_slider.setPageStep(5)
-        self.tgp_slider.setFixedWidth(180)   # biraz daha uzun
+        # Sabit genişlik kaldırıldı; konteyner içinde otomatik genişler
         self.tgp_slider.setStyleSheet(
             f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
             f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
@@ -3716,14 +3723,16 @@ except Exception as e:
             lambda v: self.tgp_value_label.setText(f"{v}W")
         )
 
+        slider_inner_layout.addWidget(self.tgp_slider)
+        slider_inner_layout.addWidget(self.tgp_value_label)
+
         self.btn_apply_tgp = QPushButton("Apply")
         self.btn_apply_tgp.setObjectName("apply_button")
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
-        tgp_layout.addWidget(self.tgp_slider)
-        tgp_layout.addWidget(self.tgp_value_label)
-        tgp_layout.addStretch()            # ← boşluğu buraya al, butonu sağa iter
+        # Konteyner (slider+etiket) boşluğu doldurur, buton sağa yaslanır
+        tgp_layout.addWidget(slider_container)
         tgp_layout.addWidget(self.btn_apply_tgp)
 
         dual_panel_layout.addWidget(tgp_group, stretch=1)  # cTGP daha dar
