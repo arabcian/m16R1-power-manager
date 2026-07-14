@@ -23,8 +23,8 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
     """Apply a named profile to the given GPU. Returns a list of error strings."""
     from .native import load_profile
     from ..hal.gpu import get_gpu
-    from ..hal.limits import set_power_limit, set_mem_locked_clocks
-    from ..hal.vfcurve import write_offsets, reset_offsets, write_memory_offset
+    from ..hal.limits import set_power_limit, set_mem_locked_clocks, set_clock_offsets
+    from ..hal.vfcurve import write_offsets, reset_offsets
     from ..hal.snapshot import save as snapshot_save
     from ..safety import validate_write
 
@@ -50,14 +50,14 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
         if not ok:
             errs.append(f"Mem locked clocks: {msg}")
 
-    # NOTE: previously routed through NVML's set_clock_offsets(pstate=0),
-    # separately from a GUI-level NvAPI write that only touched 2 of the 6
-    # real memory-domain points (131/132, not 127-132). Now uses the
-    # corrected, single, full-domain NvAPI mechanism — same one the "gpu"
-    # domain has always used correctly via write_global_offset.
+    # NOTE: was briefly routed through NvAPI's write_memory_offset. Combining
+    # an NVML lock with an NvAPI offset lets the offset silently blow past
+    # the lock's ceiling (confirmed empirically: lock=9600 + NvAPI offset
+    # +1000 measured 10000, not capped). Back to NVML's set_clock_offsets for
+    # both, so lock and offset are resolved by the same API.
     if profile.mem_offset_mhz is not None:
-        ret, msg = write_memory_offset(gpu, profile.mem_offset_mhz * 1000)
-        if ret != 0:
+        ok, msg = set_clock_offsets(None, profile.mem_offset_mhz, gpu_index)
+        if not ok:
             errs.append(f"Mem offset: {msg}")
 
     if profile.power_limit_w is not None:
