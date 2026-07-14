@@ -3645,7 +3645,7 @@ except Exception as e:
         dual_panel_layout = QHBoxLayout()
         dual_panel_layout.setSpacing(6)
 
-        # 1) Point Info & Controls (solda, daraltılmış)
+        # 1) Point Info & Controls (solda, geniş)
         info_panel = QGroupBox(" Point Info & Controls ")
         info_panel_layout = QHBoxLayout(info_panel)
         info_panel_layout.setContentsMargins(6, 6, 6, 6)
@@ -3666,7 +3666,7 @@ except Exception as e:
         self.point_offset_spin.setEnabled(False)
 
         for lbl in (self.point_index_label, self.point_voltage_label, self.point_freq_label, self.point_offset_label):
-                lbl.setFixedWidth(90)
+            lbl.setFixedWidth(90)
 
         info_panel_layout.addWidget(self.point_index_label)
         info_panel_layout.addWidget(self.point_voltage_label)
@@ -3690,20 +3690,20 @@ except Exception as e:
         info_panel_layout.addWidget(self.limit_spin)
         info_panel_layout.addStretch()
 
-        dual_panel_layout.addWidget(info_panel, stretch=1)
+        dual_panel_layout.addWidget(info_panel, stretch=2)  # info panel daha geniş
 
-        # 2) cTGP (sağda) - sadece slider + değer + apply
+        # 2) cTGP (sağda, dar) - slider + yanında apply
         tgp_group = QGroupBox(" cTGP ")
         tgp_layout = QHBoxLayout(tgp_group)
         tgp_layout.setContentsMargins(8, 6, 8, 6)
-        tgp_layout.setSpacing(6)
+        tgp_layout.setSpacing(4)
 
         self.tgp_slider = QSlider(Qt.Horizontal)
         self.tgp_slider.setRange(130, 175)
         self.tgp_slider.setValue(130)
-        self.tgp_slider.setSingleStep(5)      # 5 watt adım
-        self.tgp_slider.setPageStep(5)        # ok tuşlarıyla da 5 watt
-        self.tgp_slider.setFixedWidth(200)    # daha geniş
+        self.tgp_slider.setSingleStep(5)
+        self.tgp_slider.setPageStep(5)
+        self.tgp_slider.setFixedWidth(180)   # biraz daha uzun
         self.tgp_slider.setStyleSheet(
             f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
             f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
@@ -3721,13 +3721,13 @@ except Exception as e:
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
-        # Slider ve değer solda, araya stretch koyarak butonu sağa yaslıyoruz
+        # Apply butonu slider'ın hemen sağında, arada boşluk yok
         tgp_layout.addWidget(self.tgp_slider)
         tgp_layout.addWidget(self.tgp_value_label)
-        tgp_layout.addStretch()          # esnek boşluk, butonu sağa iter
         tgp_layout.addWidget(self.btn_apply_tgp)
+        tgp_layout.addStretch()   # kalan boşluğu doldur
 
-        dual_panel_layout.addWidget(tgp_group, stretch=1)
+        dual_panel_layout.addWidget(tgp_group, stretch=1)  # cTGP daha dar
 
         layout.addLayout(dual_panel_layout)
 
