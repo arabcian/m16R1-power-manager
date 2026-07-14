@@ -3675,7 +3675,7 @@ except Exception as e:
         info_panel_layout.addWidget(self.point_offset_spin)
 
         # Flatten After Index (küçültüldü)
-        limit_label = SL("Flatten:", color=C_GREY)
+        limit_label = SL("Flatten After Index:", color=C_GREY)
         limit_label.setFixedWidth(55)
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(-1, 126)
@@ -3686,9 +3686,11 @@ except Exception as e:
         self.limit_spin.setFixedWidth(60)
         self.limit_spin.editingFinished.connect(self._on_flatten_entered)
 
+        info_panel_layout.addWidget(self.point_offset_spin)
+        info_panel_layout.addStretch()          # ← bu stretch sağa iter
         info_panel_layout.addWidget(limit_label)
         info_panel_layout.addWidget(self.limit_spin)
-        info_panel_layout.addStretch()
+        # info_panel_layout.addStretch()        # ← eski stretch kaldırıldı
 
         dual_panel_layout.addWidget(info_panel, stretch=2)  # info panel daha geniş
 
