@@ -3589,7 +3589,7 @@ except Exception as e:
             self._cf_timer.start()
 
     # ─── TAB 4: GPU TUNING ──────────────────────────────────────────────
-def _build_tab_gpu(self):
+    def _build_tab_gpu(self):
         tab = QWidget()
         tab.setStyleSheet(f"background:{C_BG};")
         layout = QVBoxLayout(tab)
