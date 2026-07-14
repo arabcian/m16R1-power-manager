@@ -39,6 +39,7 @@ from .hal.limits import (
     get_power_limit,
     set_power_limit,
     get_clock_offsets,
+    set_clock_offsets,
     get_mem_offset_range,
     get_max_mem_clock,
     set_mem_locked_clocks,
@@ -58,8 +59,6 @@ from .hal.vfcurve import (
     reset_offsets,
     write_global_offset,
     write_offsets,
-    write_memory_offset,
-    reset_memory_offsets,
 )
 from .safety import validate_write, check_negative_freq_warnings
 
@@ -636,14 +635,14 @@ async def _apply_profile(name: str, gpu_index: int = 0) -> list[str]:
         if not ok:
             errs.append(f"Mem locked clocks: {msg}")
 
-    # NOTE: previously routed through NVML's set_clock_offsets(pstate=0),
-    # separately from a GUI-level NvAPI write that only touched 2 of the 6
-    # real memory-domain points (131/132, not 127-132). Now uses the
-    # corrected, single, full-domain NvAPI mechanism — same one the "gpu"
-    # domain has always used correctly via write_global_offset.
+    # NOTE: was briefly routed through NvAPI's write_memory_offset. Combining
+    # an NVML lock with an NvAPI offset lets the offset silently blow past
+    # the lock's ceiling (confirmed empirically: lock=9600 + NvAPI offset
+    # +1000 measured 10000, not capped). Back to NVML's set_clock_offsets for
+    # both, so lock and offset are resolved by the same API.
     if profile.mem_offset_mhz is not None:
-        ret, msg = await _run(write_memory_offset, gpu, profile.mem_offset_mhz * 1000)
-        if ret != 0:
+        ok, msg = await _run(set_clock_offsets, None, profile.mem_offset_mhz, gpu_index)
+        if not ok:
             errs.append(f"Mem offset: {msg}")
 
     if profile.power_limit_w is not None:
@@ -781,18 +780,19 @@ async def api_limits_update(req: LimitsRequest, gpu_index: int = 0):
             errs.append(f"Power Limit: {msg}")
 
     if req.mem_offset_mhz is not None:
-        # NOTE: previously routed through NVML's set_clock_offsets(pstate=0).
-        # Now uses the corrected, full-memory-domain NvAPI write (see
-        # write_memory_offset) — the same mechanism the "gpu" domain has
-        # always used correctly via write_global_offset.
-        ret, msg = await _run(write_memory_offset, gpu, req.mem_offset_mhz * 1000)
-        if ret != 0:
+        # NOTE: was briefly routed through NvAPI's write_memory_offset.
+        # Combining an NVML lock with an NvAPI offset lets the offset
+        # silently blow past the lock's ceiling (confirmed empirically:
+        # lock=9600 + NvAPI offset +1000 measured 10000, not capped). Back to
+        # NVML's set_clock_offsets for both, so lock and offset are resolved
+        # by the same API.
+        ok, msg = await _run(set_clock_offsets, None, req.mem_offset_mhz, gpu_index)
+        if not ok:
             errs.append(f"Mem Offset: {msg}")
         else:
-            # Re-apply the last known curve (gpu-domain) offsets in case of
-            # any driver side-effect. write_memory_offset preserves the
-            # existing table via a read-modify-write, so this is now mostly
-            # a safety net rather than a required recovery step.
+            # Setting the NVML mem offset can reset the GPC/curve table as a
+            # driver side-effect — re-apply the last known curve offsets to
+            # restore them.
             await _reapply_curve(gpu_index)
 
     if req.mem_locked_reset:
@@ -865,8 +865,8 @@ async def api_limits_reset(gpu_index: int = 0):
         if not ok:
             errs.append(f"Power Limit: {msg}")
 
-    ret, msg = await _run(reset_memory_offsets, gpu)
-    if ret != 0:
+    ok, msg = await _run(set_clock_offsets, None, 0, gpu_index)
+    if not ok:
         errs.append(f"Mem Offset: {msg}")
     else:
         await _reapply_curve(gpu_index)
