@@ -3721,11 +3721,10 @@ except Exception as e:
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
-        # Apply butonu slider'ın hemen sağında, arada boşluk yok
         tgp_layout.addWidget(self.tgp_slider)
         tgp_layout.addWidget(self.tgp_value_label)
+        tgp_layout.addStretch()            # ← boşluğu buraya al, butonu sağa iter
         tgp_layout.addWidget(self.btn_apply_tgp)
-        tgp_layout.addStretch()   # kalan boşluğu doldur
 
         dual_panel_layout.addWidget(tgp_group, stretch=1)  # cTGP daha dar
 
