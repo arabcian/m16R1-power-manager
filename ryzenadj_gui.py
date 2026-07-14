@@ -4770,6 +4770,13 @@ except Exception as e:
         # of the P0→P2 pstate confusion observed when combining a curve edit
         # with a memory offset. Testing NVML-only (mem_offset_mhz) now;
         # points 131/132 are intentionally NOT written here anymore.
+        #
+        # NVML on Linux is known to apply only half of the requested
+        # mem_offset_mhz (GDDR real-clock vs effective-data-rate reporting —
+        # same phenomenon noted in LACT's issue #486 thread). The spin box
+        # represents the effective MHz the user wants; send double that to
+        # NVML so the actually-applied clock matches what's shown here.
+        mem_off_nvml = mem_off * 2
 
         vram_lock_max = self.vram_lock_max_spin.value()
         vram_lock_min = self.vram_lock_min_spin.value()
@@ -4788,11 +4795,16 @@ except Exception as e:
             # "is not None" check treats 0 as valid too and makes an
             # unnecessary NVML mem-offset call, which crashed the whole
             # apply with a permission error on some drivers.
-            "mem_offset_mhz": mem_off if mem_off != 0 else None,
+            # mem_offset_mhz stores the RAW value sent to NVML (already
+            # doubled) — this is what any other apply path (CLI, autoload)
+            # sends straight to NVML, so it must already include the 2x
+            # compensation, not the "effective" box value.
+            "mem_offset_mhz": mem_off_nvml if mem_off != 0 else None,
             "power_limit_w": None,
             "mem_locked_min_mhz": vram_lock_min if vram_lock_max != 0 else None,
             "mem_locked_max_mhz": vram_lock_max if vram_lock_max != 0 else None,
         }
+
 
         project_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -5081,13 +5093,19 @@ except Exception as e:
             self._default_base_freqs = [f for _, f in self._default_points]
 
         curve_deltas = data.get('curve_deltas', {})
-        mem_offset = data.get('mem_offset_mhz', 0)
+        mem_offset_raw = data.get('mem_offset_mhz', 0)
 
-        if mem_offset == 0:
-            if '131' in curve_deltas:
-                mem_offset = curve_deltas['131'] // 1000
-            elif '132' in curve_deltas:
-                mem_offset = curve_deltas['132'] // 1000
+        if mem_offset_raw != 0:
+            # Stored value is the raw, already-doubled NVML value (see
+            # _apply_gpu_offsets/_gather_current_profile_data) — halve it
+            # back for display so the box shows the effective MHz.
+            mem_offset = mem_offset_raw // 2
+        elif '131' in curve_deltas:
+            mem_offset = curve_deltas['131'] // 1000
+        elif '132' in curve_deltas:
+            mem_offset = curve_deltas['132'] // 1000
+        else:
+            mem_offset = 0
 
         new_offsets = {}
         for i in range(127):
@@ -5153,6 +5171,10 @@ except Exception as e:
         mem_off = self.mem_offset_spin.value()
         # EXPERIMENT: no longer duplicating mem_off into curve points 131/132
         # (NvAPI) alongside mem_offset_mhz (NVML) below — see _apply_gpu_offsets.
+        # Same 2x NVML compensation as _apply_gpu_offsets (see there) — the
+        # box holds the effective MHz, mem_offset_mhz stores the raw doubled
+        # value that any apply path sends straight to NVML.
+        mem_off_nvml = mem_off * 2
         vram_lock_max = self.vram_lock_max_spin.value()
         vram_lock_min = self.vram_lock_min_spin.value()
         if vram_lock_max != 0 and vram_lock_min == 0:
@@ -5161,7 +5183,7 @@ except Exception as e:
             "name": "custom",
             "gpu_name": "NVIDIA GeForce RTX 4080 Laptop GPU",
             "curve_deltas": offsets,
-            "mem_offset_mhz": mem_off,
+            "mem_offset_mhz": mem_off_nvml,
             "power_limit_w": None,
             "mem_locked_min_mhz": vram_lock_min if vram_lock_max != 0 else None,
             "mem_locked_max_mhz": vram_lock_max if vram_lock_max != 0 else None,
