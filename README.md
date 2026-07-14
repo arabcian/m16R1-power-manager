@@ -1,3 +1,5 @@
+Disclaimer: This software can damage your hardware if used carelessly use at your OWN RISK! Author has no intent to do that be CAREFUL!
+
 # RyzenAdj GUI
 
 AMD Ryzen (Alienware M16 R1 AMD) güç yönetimi, GPU V/F eğrisi (nvcurve) ve
