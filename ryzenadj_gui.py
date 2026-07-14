@@ -3730,7 +3730,7 @@ except Exception as e:
 
         mem_label = SL("Memory Offset:", color=C_GREY)
         self.mem_offset_spin = QSpinBox()
-        self.mem_offset_spin.setRange(-1000, 1000)
+        self.mem_offset_spin.setRange(-1500, 1500)
         self.mem_offset_spin.setValue(0)
         self.mem_offset_spin.setSuffix(" MHz")
         self.mem_offset_spin.setFixedHeight(25)
@@ -5355,13 +5355,16 @@ except Exception as e:
                     points = []
                     base_freqs = []
                     offsets = {}
-                    mem_offset = 0
-                    # Also get the memory offset separately
-                    for p in all_points:
-                        idx = p["index"]
-                        if idx == 131 or idx == 132:
-                            mem_offset = p.get("freq_offset_kHz", 0) // 1000
-                            break
+                    # NOTE: this used to also read a "memory offset" back from
+                    # NvAPI curve points 131/132 (freq_offset_kHz) and use it
+                    # to overwrite mem_offset_spin. Since mem_offset_mhz is now
+                    # applied via NVML (see profiles/apply.py), those NvAPI
+                    # points no longer receive that write — reading them back
+                    # here was showing a stale/disconnected value (the
+                    # reported "value changes after Apply" symptom). There's
+                    # no NVML-based mem-offset field in this JSON to read
+                    # instead, so we simply leave mem_offset_spin as the user
+                    # set it rather than overwrite it with wrong data.
 
                     # Process the GPU points
                     for p in gpu_points:
@@ -5389,10 +5392,6 @@ except Exception as e:
                         self.core_offset_spin.setValue(0)
                         self.core_offset_spin.blockSignals(False)
                         self._point_offsets = offsets
-
-                    self.mem_offset_spin.blockSignals(True)
-                    self.mem_offset_spin.setValue(mem_offset)
-                    self.mem_offset_spin.blockSignals(False)
 
                     self._curve_modified = False
                     self._default_points = points
@@ -5439,20 +5438,17 @@ except Exception as e:
             if "vf_curve" in data:
                 all_points = data["vf_curve"]
                 new_offsets = {}
-                mem_offset = 0
+                # NOTE: no longer reading a "memory offset" back from NvAPI
+                # points 131/132 here — see the matching note in
+                # _on_curve_read_finished above. mem_offset_spin is left as
+                # the user set it.
                 for p in all_points:
                     idx = p["index"]
                     offset_khz = p.get("freq_offset_kHz", 0)
-                    if idx == 131 or idx == 132:
-                        mem_offset = offset_khz // 1000
-                    else:
-                        if p.get("domain") == "gpu":
-                            new_offsets[idx] = offset_khz // 1000
+                    if p.get("domain") == "gpu":
+                        new_offsets[idx] = offset_khz // 1000
                 self._point_offsets = new_offsets
                 self._read_offsets = new_offsets.copy()
-                self.mem_offset_spin.blockSignals(True)
-                self.mem_offset_spin.setValue(mem_offset)
-                self.mem_offset_spin.blockSignals(False)
                 self._core_offset = 0
                 self.core_offset_spin.blockSignals(True)
                 self.core_offset_spin.setValue(0)
@@ -5491,13 +5487,15 @@ except Exception as e:
                     points = []
                     base_freqs = []
                     offsets = {}
+                    # NOTE: "Reset Curve" zeros the NvAPI VF curve (points
+                    # 0-132), but does NOT touch the separate NVML
+                    # mem_offset_mhz — those are two different mechanisms
+                    # (see profiles/apply.py). Showing the Memory Offset box
+                    # as 0 here matches "everything reset" intent, but if the
+                    # NVML offset is still actually applied on hardware, this
+                    # display won't reflect that; there's no current backend
+                    # path that also clears the NVML offset on curve reset.
                     mem_offset = 0
-                    # Memory offset'ini al
-                    for p in all_points:
-                        idx = p["index"]
-                        if idx == 131 or idx == 132:
-                            mem_offset = p.get("freq_offset_kHz", 0) // 1000
-                            break
 
                     # Process the GPU points
                     for p in gpu_points:
