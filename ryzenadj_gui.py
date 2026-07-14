@@ -3701,17 +3701,19 @@ except Exception as e:
         self.tgp_slider = QSlider(Qt.Horizontal)
         self.tgp_slider.setRange(130, 175)
         self.tgp_slider.setValue(130)
-        self.tgp_slider.setFixedWidth(160)
+        self.tgp_slider.setSingleStep(5)      # 5 watt adım
+        self.tgp_slider.setPageStep(5)        # ok tuşlarıyla da 5 watt
+        self.tgp_slider.setFixedWidth(200)    # daha geniş
         self.tgp_slider.setStyleSheet(
-                f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
-                f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
+            f"QSlider::groove:horizontal {{ background:{C_BG3}; height:4px; border-radius:2px; }}"
+            f"QSlider::handle:horizontal {{ background:{C_CYAN}; width:12px; margin:-4px 0; border-radius:6px; }}"
         )
 
         self.tgp_value_label = SL("130W", color=C_CYAN)
         self.tgp_value_label.setFixedWidth(40)
 
         self.tgp_slider.valueChanged.connect(
-                lambda v: self.tgp_value_label.setText(f"{v}W")
+            lambda v: self.tgp_value_label.setText(f"{v}W")
         )
 
         self.btn_apply_tgp = QPushButton("Apply")
@@ -3719,10 +3721,11 @@ except Exception as e:
         self.btn_apply_tgp.setFixedHeight(22)
         self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
 
+        # Slider ve değer solda, araya stretch koyarak butonu sağa yaslıyoruz
         tgp_layout.addWidget(self.tgp_slider)
         tgp_layout.addWidget(self.tgp_value_label)
+        tgp_layout.addStretch()          # esnek boşluk, butonu sağa iter
         tgp_layout.addWidget(self.btn_apply_tgp)
-        tgp_layout.addStretch()
 
         dual_panel_layout.addWidget(tgp_group, stretch=1)
 
