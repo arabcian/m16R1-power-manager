@@ -357,6 +357,19 @@ def get_mem_offset_range(gpu_index: int = 0) -> dict:
 # down-clocking entirely. Passing min == max (e.g. the highest supported clock
 # from get_max_mem_clock) is what gives "VRAM always at max frequency" behavior.
 # nvmlDeviceResetMemoryLockedClocks hands control back to the driver.
+#
+# Confirmed model (from LACT's nvidia backend, a comparable NVML-based tool,
+# and github.com/ilya-zlobintsev/LACT issue #486): a locked clock is a hard
+# ceiling on the achieved frequency — combining it with a positive
+# mem_offset_mhz does NOT raise the achieved clock past the lock's max. What
+# the offset changes is the *voltage* the driver picks to reach that same
+# ceiling (this is the actual undervolt trick: same clock, lower voltage).
+# To get a higher achieved clock than a lock's max, don't lock at all and use
+# the offset alone against the natural boost algorithm.
+# LACT also always applies the lock *before* the offset (and undoes them in
+# reverse order) — callers here (profiles/apply.py, cli.py profile apply,
+# server.py _apply_profile) follow the same order; setting the offset first
+# and locking afterward risks the lock call resetting it.
 
 def get_supported_mem_clocks(gpu_index: int = 0) -> list[int]:
     """Return the memory clocks (MHz) the driver reports as supported, ascending.
@@ -381,6 +394,25 @@ def get_max_mem_clock(gpu_index: int = 0) -> Optional[int]:
     """
     clocks = get_supported_mem_clocks(gpu_index)
     return clocks[-1] if clocks else None
+
+
+def get_current_mem_clock(gpu_index: int = 0) -> Optional[int]:
+    """Return the memory clock (MHz) NVML currently reports as running.
+
+    Useful right after set_mem_locked_clocks: NVML silently snaps a
+    requested lock value to the nearest entry in get_supported_mem_clocks
+    (the GPU's stock/VBIOS clock table) rather than erroring, so the actual
+    resulting clock can differ from what was requested — this lets callers
+    report the real outcome instead of assuming the request was honored.
+    """
+    if not _NVML_AVAILABLE:
+        return None
+    try:
+        handle = _get_handle(gpu_index)
+        return int(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM))
+    except Exception as exc:
+        log.debug("get_current_mem_clock: %s", exc)
+        return None
 
 
 def set_mem_locked_clocks(min_mhz: int, max_mhz: int, gpu_index: int = 0) -> tuple[bool, str]:

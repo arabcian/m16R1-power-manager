@@ -625,7 +625,16 @@ async def _apply_profile(name: str, gpu_index: int = 0) -> list[str]:
 
     errs: list[str] = []
 
-    # Apply mem offset first — driver may reset curve table as a side-effect.
+    # Order matters: LACT's nvidia backend always sets locked clocks *before*
+    # the offset (and undoes them in reverse) — the lock is the outer layer,
+    # the offset applies on top of it. The other way round risks the lock
+    # call resetting/ignoring an offset that was already set.
+    if profile.mem_locked_max_mhz is not None:
+        min_mhz = profile.mem_locked_min_mhz if profile.mem_locked_min_mhz is not None else profile.mem_locked_max_mhz
+        ok, msg = await _run(set_mem_locked_clocks, min_mhz, profile.mem_locked_max_mhz, gpu_index)
+        if not ok:
+            errs.append(f"Mem locked clocks: {msg}")
+
     if profile.mem_offset_mhz is not None:
         ok, msg = await _run(set_clock_offsets, None, profile.mem_offset_mhz, gpu_index)
         if not ok:
@@ -635,12 +644,6 @@ async def _apply_profile(name: str, gpu_index: int = 0) -> list[str]:
         ok, msg = await _run(set_power_limit, profile.power_limit_w, gpu_index)
         if not ok:
             errs.append(f"Power limit: {msg}")
-
-    if profile.mem_locked_max_mhz is not None:
-        min_mhz = profile.mem_locked_min_mhz if profile.mem_locked_min_mhz is not None else profile.mem_locked_max_mhz
-        ok, msg = await _run(set_mem_locked_clocks, min_mhz, profile.mem_locked_max_mhz, gpu_index)
-        if not ok:
-            errs.append(f"Mem locked clocks: {msg}")
 
     # Apply curve deltas (after mem offset which may have wiped them).
     async with g_state["write_lock"]:

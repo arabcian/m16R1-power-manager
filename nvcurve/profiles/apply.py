@@ -36,7 +36,20 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
 
     errs: list[str] = []
 
-    # Apply mem offset first — driver may reset curve table as a side-effect.
+    # Order matters here: LACT's nvidia backend (a comparable NVML-based tool)
+    # always sets locked clocks *before* the offset, and resets them in the
+    # reverse order (offset first, then locked clocks) — treating the lock as
+    # the outer layer and the offset as applied on top of it. Setting the
+    # offset first and locking afterward risks the lock call resetting or
+    # ignoring the previously-applied offset.
+    if profile.mem_locked_max_mhz is not None:
+        min_mhz = profile.mem_locked_min_mhz
+        if min_mhz is None:
+            min_mhz = profile.mem_locked_max_mhz
+        ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
+        if not ok:
+            errs.append(f"Mem locked clocks: {msg}")
+
     if profile.mem_offset_mhz is not None:
         ok, msg = set_clock_offsets(None, profile.mem_offset_mhz, gpu_index)
         if not ok:
@@ -46,14 +59,6 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
         ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
         if not ok:
             errs.append(f"Power limit: {msg}")
-
-    if profile.mem_locked_max_mhz is not None:
-        min_mhz = profile.mem_locked_min_mhz
-        if min_mhz is None:
-            min_mhz = profile.mem_locked_max_mhz
-        ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
-        if not ok:
-            errs.append(f"Mem locked clocks: {msg}")
 
     if profile.curve_deltas:
         deltas = {int(k): v for k, v in profile.curve_deltas.items()}

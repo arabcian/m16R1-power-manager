@@ -1113,6 +1113,18 @@ def cmd_profile(args):
         warnings = []
         critical_errs = []
 
+        # Order matters: LACT's nvidia backend always sets locked clocks
+        # *before* the offset (and undoes them in reverse) — the lock is the
+        # outer layer, the offset applies on top of it. Doing it the other
+        # way risks the lock call resetting/ignoring the offset already set.
+        if profile.mem_locked_max_mhz is not None:
+            min_mhz = profile.mem_locked_min_mhz
+            if min_mhz is None:
+                min_mhz = profile.mem_locked_max_mhz
+            ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
+            if not ok:
+                warnings.append(f"Mem locked clocks: {msg}")
+
         if profile.mem_offset_mhz is not None:
             ok, msg = set_clock_offsets(None, profile.mem_offset_mhz, gpu_index)
             if not ok:
@@ -1122,14 +1134,6 @@ def cmd_profile(args):
             ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
             if not ok:
                 warnings.append(f"Power limit: {msg}")
-
-        if profile.mem_locked_max_mhz is not None:
-            min_mhz = profile.mem_locked_min_mhz
-            if min_mhz is None:
-                min_mhz = profile.mem_locked_max_mhz
-            ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
-            if not ok:
-                warnings.append(f"Mem locked clocks: {msg}")
 
         if profile.curve_deltas:
             deltas = {int(k): v for k, v in profile.curve_deltas.items()}
@@ -1187,7 +1191,7 @@ def cmd_memlock(args):
     """
     from .hal.limits import (
         get_supported_mem_clocks, get_max_mem_clock,
-        set_mem_locked_clocks, reset_mem_locked_clocks,
+        set_mem_locked_clocks, reset_mem_locked_clocks, get_current_mem_clock,
     )
 
     gpu_index = getattr(args, "gpu_index", 0)
@@ -1200,6 +1204,8 @@ def cmd_memlock(args):
         else:
             print(f"Supported memory clocks: {clocks[0]}–{clocks[-1]} MHz "
                   f"({len(clocks)} steps)")
+            print(f"Max lock target: {clocks[-1]} MHz — this is the GPU's stock/VBIOS clock table max, "
+                  f"NOT the offset-boosted max. Requesting a lock above it silently snaps down to it.")
         print("Note: NVML does not expose whether a lock is currently active or its range;")
         print("this only reports what values are legal to lock to.")
         return
@@ -1236,7 +1242,22 @@ def cmd_memlock(args):
         if not ok:
             print(f"Error: {msg}", file=sys.stderr)
             sys.exit(1)
-        print(f"Memory clock locked to {min_mhz}–{max_mhz} MHz.")
+
+        # The driver silently snaps an unsupported request to the nearest
+        # entry in its stock clock table instead of erroring — read back
+        # what actually landed so the user isn't misled by the request alone.
+        actual = get_current_mem_clock(gpu_index)
+        if actual is not None and actual != max_mhz:
+            print(f"Requested lock: {min_mhz}\u2013{max_mhz} MHz — driver resolved to {actual} MHz "
+                  f"(nearest supported stock clock; see 'nvcurve memlock status' for the legal set).")
+        else:
+            print(f"Memory clock locked to {min_mhz}\u2013{max_mhz} MHz.")
+        print("Note: a memory-offset (mem_offset_mhz) does not push the clock past this lock's "
+              "ceiling — the locked value is a hard cap. What the offset changes is the voltage the "
+              "driver uses to reach that same ceiling (this is the actual undervolt mechanism; see "
+              "nvidia/LACT issue #486 for the community writeup). Also, set the lock BEFORE the "
+              "offset (nvcurve does this automatically via `profile apply`) — doing it in the "
+              "other order risks the lock call resetting the offset.")
         return
 
 

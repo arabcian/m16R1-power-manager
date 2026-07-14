@@ -842,6 +842,9 @@ def op_set_vram_memlock(params: dict) -> dict:
     )
     if result.returncode != 0:
         return {"ok": False, "error": result.stderr.strip() or "nvcurve memlock set failed"}
+    # `nvcurve memlock set` itself prints a warning to stdout (not stderr) when
+    # the driver silently snapped the request to a different stock clock —
+    # surface that in the returned message instead of a blanket "locked" claim.
     return {"ok": True, "message": result.stdout.strip() or f"VRAM locked to {min_mhz}-{max_mhz} MHz."}
 
 
