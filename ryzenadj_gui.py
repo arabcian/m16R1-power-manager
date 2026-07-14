@@ -4763,18 +4763,22 @@ except Exception as e:
                 offsets_to_apply[i] = delta * 1000
 
         mem_off = self.mem_offset_spin.value()
-        if mem_off != 0:
-            offsets_to_apply[131] = mem_off * 1000
-            offsets_to_apply[132] = mem_off * 1000
-
-        if not offsets_to_apply:
-            self._log("No offsets to apply.")
-            return
+        # EXPERIMENT: previously this also wrote offsets_to_apply[131]/[132]
+        # (NvAPI ClockBoostTable memory points) with the SAME delta that goes
+        # into mem_offset_mhz below (NVML). Two different APIs poking the
+        # same underlying VF curve/offset in one apply is the likely cause
+        # of the P0→P2 pstate confusion observed when combining a curve edit
+        # with a memory offset. Testing NVML-only (mem_offset_mhz) now;
+        # points 131/132 are intentionally NOT written here anymore.
 
         vram_lock_max = self.vram_lock_max_spin.value()
         vram_lock_min = self.vram_lock_min_spin.value()
         if vram_lock_max != 0 and vram_lock_min == 0:
             vram_lock_min = vram_lock_max
+
+        if not offsets_to_apply and mem_off == 0 and vram_lock_max == 0:
+            self._log("No offsets to apply.")
+            return
 
         profile_data = {
             "name": profile_name,
@@ -5147,9 +5151,8 @@ except Exception as e:
             if offset != 0:
                 offsets[str(i)] = offset * 1000
         mem_off = self.mem_offset_spin.value()
-        if mem_off != 0:
-            offsets['131'] = mem_off * 1000
-            offsets['132'] = mem_off * 1000
+        # EXPERIMENT: no longer duplicating mem_off into curve points 131/132
+        # (NvAPI) alongside mem_offset_mhz (NVML) below — see _apply_gpu_offsets.
         vram_lock_max = self.vram_lock_max_spin.value()
         vram_lock_min = self.vram_lock_min_spin.value()
         if vram_lock_max != 0 and vram_lock_min == 0:
