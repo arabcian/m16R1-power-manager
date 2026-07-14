@@ -44,10 +44,37 @@ def _nvml_cdll() -> ctypes.CDLL:
     return _nvml_lib
 
 
+_nvml_initialized = False
+
+
+def _ensure_nvml_init() -> None:
+    """Call nvmlInit() once per process if it hasn't happened yet.
+
+    Every `nvcurve <cmd>` invocation is a fresh subprocess, so unlike the
+    long-lived daemon/server, nothing has necessarily called nvmlInit()
+    before hal.limits functions run (e.g. `nvcurve memlock ...`,
+    `nvcurve profile apply ...` when invoked directly). Without this, every
+    call below fails with NVML_ERROR_UNINITIALIZED ("Uninitialized").
+    nvmlInit() is safe to call more than once (refcounted internally), so a
+    module-level flag is just an optimization, not a correctness guard.
+    """
+    global _nvml_initialized
+    if _nvml_initialized:
+        return
+    try:
+        pynvml.nvmlInit()
+        _nvml_initialized = True
+    except Exception as exc:
+        # Leave the flag False so the next call retries; the actual NVML
+        # call below will surface a clearer error if init is truly broken.
+        log.debug("_ensure_nvml_init: %s", exc)
+
+
 def _get_handle(gpu_index: int):
     """Return an NVML device handle, initialising pynvml if needed."""
     if not _NVML_AVAILABLE:
         raise RuntimeError("NVML not available (install nvidia-ml-py)")
+    _ensure_nvml_init()
     return pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
 
 
