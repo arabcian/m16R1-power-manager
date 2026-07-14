@@ -3651,13 +3651,15 @@ except Exception as e:
         profile_toolbar.addWidget(self.btn_delete_profile)
         layout.addLayout(profile_toolbar)
 
-        # Point Info
+        # Point Info & TGP Controls
         info_panel = QGroupBox(" Point Info & Controls ")
         info_panel_layout = QHBoxLayout(info_panel)
+
         self.point_index_label = SL("Selected: -", color=C_GREY)
         self.point_voltage_label = SL("Voltage: - mV", color=C_GREY)
         self.point_freq_label = SL("Freq: - MHz", color=C_GREY)
         self.point_offset_label = SL("Offset: - MHz", color=C_GREY)
+
         self.point_offset_spin = QSpinBox()
         self.point_offset_spin.setRange(-1000, 1000)
         self.point_offset_spin.setValue(0)
@@ -3667,6 +3669,18 @@ except Exception as e:
         self.point_offset_spin.valueChanged.connect(self._on_point_offset_spin_changed)
         self.point_offset_spin.setEnabled(False)
 
+        info_panel_layout.addWidget(self.point_index_label)
+        info_panel_layout.addWidget(self.point_voltage_label)
+        info_panel_layout.addWidget(self.point_freq_label)
+        info_panel_layout.addWidget(self.point_offset_label)
+        info_panel_layout.addWidget(self.point_offset_spin)
+
+        # Sola yaslamak ve arayı açmak için boşluk ekliyoruz
+        info_panel_layout.addStretch()
+
+        # ==========================================
+        # 1. BÖLÜM: Flatten After Index
+        # ==========================================
         limit_label = SL("Flatten After Index:", color=C_GREY)
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(-1, 126)
@@ -3677,14 +3691,50 @@ except Exception as e:
         self.limit_spin.setFixedWidth(70)
         self.limit_spin.editingFinished.connect(self._on_flatten_entered)
 
-        info_panel_layout.addWidget(self.point_index_label)
-        info_panel_layout.addWidget(self.point_voltage_label)
-        info_panel_layout.addWidget(self.point_freq_label)
-        info_panel_layout.addWidget(self.point_offset_label)
-        info_panel_layout.addWidget(self.point_offset_spin)
-        info_panel_layout.addStretch()
         info_panel_layout.addWidget(limit_label)
         info_panel_layout.addWidget(self.limit_spin)
+
+        info_panel_layout.addSpacing(15) # Araya biraz boşluk
+
+        # ==========================================
+        # ARA BÖLÜCÜ ÇİZGİ
+        # ==========================================
+        separator = QFrame()
+        separator.setFrameShape(QFrame.VLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet(f"color: {C_GREY};")
+        info_panel_layout.addWidget(separator)
+
+        info_panel_layout.addSpacing(15) # Çizgiden sonra boşluk
+
+        # ==========================================
+        # 2. BÖLÜM: GPU TGP (130W - 175W)
+        # ==========================================
+        lbl_tgp = SL("TGP:", color=C_GREY)
+
+        self.tgp_slider = QSlider(Qt.Horizontal)
+        self.tgp_slider.setRange(130, 175)
+        self.tgp_slider.setValue(130)
+        self.tgp_slider.setFixedWidth(100) # Tasarımı bozmaması için genişliği sabitledik
+
+        self.tgp_value_label = SL("130W", color=C_CYAN)
+        self.tgp_value_label.setFixedWidth(40)
+
+        self.tgp_slider.valueChanged.connect(
+            lambda v: self.tgp_value_label.setText(f"{v}W")
+        )
+
+        self.btn_apply_tgp = QPushButton("🚀 Apply")
+        self.btn_apply_tgp.setObjectName("apply_button")
+        self.btn_apply_tgp.setFixedHeight(22)
+        self.btn_apply_tgp.clicked.connect(self._apply_gpu_tgp)
+
+        info_panel_layout.addWidget(lbl_tgp)
+        info_panel_layout.addWidget(self.tgp_slider)
+        info_panel_layout.addWidget(self.tgp_value_label)
+        info_panel_layout.addWidget(self.btn_apply_tgp)
+
+        # Grubu ana düzene ekle
         layout.addWidget(info_panel)
 
         # V/F Curve
@@ -3818,6 +3868,33 @@ except Exception as e:
         self._gpu_tab_index = None   # _connect_tab_timers'ta doldurulacak
 
     # ─── GPU TUNING METHODS ─────────────────────────────────────────────
+
+    def _apply_gpu_tgp(self):
+        """Seçilen TGP değerini /usr/local/sbin/nvctgp betiği üzerinden uygular."""
+        target_watt = self.tgp_slider.value()
+        self._log(f"⚙️ GPU TGP {target_watt}W olarak ayarlanıyor...")
+
+        # root_helper.py halihazırda yetkili (root) olarak çalıştığı için
+        # sudo kullanmadan doğrudan betik yolunu çağırıyoruz.
+        # Betiğin çıktılarını yakalayıp GUI'nin log veya hata mekanizmasına iletiyoruz.
+        script_content = f"""#!/usr/bin/env bash
+out=$(/usr/local/sbin/nvctgp {target_watt} 2>&1)
+rc=$?
+
+if [ $rc -ne 0 ]; then
+    echo "WARNING: nvctgp hatası: $out" >&2
+    exit $rc
+else
+    echo "OK: $out"
+fi
+"""
+        self._run_root_helper_command(
+            {"op": "run_script_content", "content": script_content},
+            f"GPU TGP başarıyla {target_watt}W olarak ayarlandı.",
+            "GPU TGP ayarlanırken hata oluştu.",
+            callback=None
+        )
+
     def _recompute_display(self):
         if not self._default_points:
             return
