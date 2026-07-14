@@ -276,6 +276,43 @@ def write_global_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int
     return write_offsets(gpu, point_deltas, dry_run=dry_run)
 
 
+def write_memory_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int, str]:
+    """Apply a uniform frequency offset to all memory-domain points.
+
+    Mirrors write_global_offset() above, but for domain == "memory" instead
+    of "gpu". Memory-domain indices are discovered dynamically from the
+    current curve (via read_curve's flags==1 detection) rather than assumed
+    — on this GPU the memory domain spans 6 points (127-132), not 2. A
+    previous GUI-level mechanism hardcoded only points 131/132, leaving the
+    other 4 memory-domain points at their stock values. That produces an
+    inconsistent/partial V/F curve for the memory domain (unlike the "gpu"
+    domain, which has always been offset uniformly across every one of its
+    points here) — a very plausible reason the driver's boost algorithm
+    fell back to a conservative pstate (P2) under load instead of reaching
+    the intended clock. Always touch every memory-domain point found.
+    """
+    curve, err = read_curve(gpu)
+    if not curve:
+        return -999, f"Failed to read curve: {err}"
+
+    point_deltas = {p.index: delta_khz for p in curve.points if p.domain == "memory"}
+    if not point_deltas:
+        return -999, "No memory-domain points found in curve"
+    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+
+
+def reset_memory_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
+    """Zero all memory-domain frequency offsets (see write_memory_offset)."""
+    curve, err = read_curve(gpu)
+    if not curve:
+        return -999, f"Failed to read curve: {err}"
+
+    point_deltas = {p.index: 0 for p in curve.points if p.domain == "memory"}
+    if not point_deltas:
+        return -999, "No memory-domain points found in curve"
+    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+
+
 def reset_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
     """Zero all GPU core frequency offsets."""
     curve, err = read_curve(gpu)
