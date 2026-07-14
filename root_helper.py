@@ -160,6 +160,20 @@ def op_set_default_gpu_profile(params: dict) -> dict:
         if not os.path.isfile(profile_path):
             return {"ok": False, "error": f"Profile not found: {name}"}
 
+    # BUG FIX: on a hardened root umask (e.g. 077), /etc/nvcurve and the
+    # config.json it contains could end up created as root-only (0700/0600)
+    # by nvcurve's own os.makedirs()/open() calls, which don't force a
+    # mode. The GUI/tray read config.json as a normal user, so silently
+    # ending up with root-only permissions here is exactly what made the
+    # ★ (and the tray's autoload) look like they "weren't working" even
+    # though the CLI call itself succeeded. Make the directory traversable
+    # up front, regardless of umask.
+    try:
+        os.makedirs("/etc/nvcurve", exist_ok=True)
+        os.chmod("/etc/nvcurve", 0o755)
+    except OSError as e:
+        return {"ok": False, "error": f"Could not prepare /etc/nvcurve: {e}"}
+
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
 
@@ -174,11 +188,13 @@ def op_set_default_gpu_profile(params: dict) -> dict:
         return {"ok": False, "error": err or "nvcurve profile default failed"}
 
     # config.json root:root, mode 0644 olmalı ki root gerektirmeden
-    # (tray/GUI kullanıcı olarak) okunabilsin.
+    # (tray/GUI kullanıcı olarak) okunabilsin. Sessizce yutmak yerine
+    # gerçek hatayı döndürüyoruz — aksi halde "arka planda çalışıyor ama
+    # GUI göstermiyor" gibi teşhisi zor bir duruma yol açar.
     try:
         os.chmod("/etc/nvcurve/config.json", 0o644)
-    except OSError:
-        pass
+    except OSError as e:
+        return {"ok": False, "error": f"Set, but could not make config.json readable: {e}"}
 
     out = (result.stdout or "").strip()
     if clear:
@@ -216,6 +232,63 @@ def op_run_gpu_autoload(params: dict) -> dict:
     if result.returncode != 0:
         return {"ok": False, "error": combined or f"autoload failed (code {result.returncode})"}
     return {"ok": True, "message": combined or "No default GPU profile configured."}
+
+
+def op_delete_nvcurve_profile(params: dict) -> dict:
+    """GPU tuning sekmesindeki 'Delete' düğmesinin karşılığı.
+
+    /etc/nvcurve/profiles altındaki profil dosyasını siler. Silinen profil
+    o an varsayılan (auto-load) profil olarak işaretliyse, `nvcurve
+    autoload`'ın artık var olmayan bir dosyaya işaret etmemesi için
+    varsayılan kaydını da temizler.
+    """
+    project_dir = params.get("project_dir")
+    name = params.get("name")
+
+    if not isinstance(name, str) or not PROFILE_NAME_RE.match(name):
+        return {"ok": False, "error": "Invalid profile name"}
+
+    target_path = os.path.join(NVCURVE_PROFILES_DIR, f"{name}.json")
+    if os.path.dirname(os.path.abspath(target_path)) != os.path.abspath(NVCURVE_PROFILES_DIR):
+        return {"ok": False, "error": "Path traversal detected"}
+
+    if not os.path.isfile(target_path):
+        return {"ok": False, "error": f"Profile not found: {name}"}
+
+    try:
+        os.remove(target_path)
+    except OSError as e:
+        return {"ok": False, "error": f"Could not delete profile: {e}"}
+
+    cleared_default = False
+    try:
+        config_path = "/etc/nvcurve/config.json"
+        if os.path.isfile(config_path) and isinstance(project_dir, str) and project_dir:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            profiles = cfg.get("auto_load_profiles", {})
+            if name in profiles.values():
+                env = os.environ.copy()
+                env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
+                subprocess.run(
+                    [sys.executable, "-m", "nvcurve", "profile", "default", "--clear"],
+                    capture_output=True, text=True, env=env, cwd=project_dir
+                )
+                try:
+                    os.chmod(config_path, 0o644)
+                except OSError:
+                    pass
+                cleared_default = True
+    except Exception:
+        # Best-effort only: profile deletion above already succeeded and
+        # is the primary outcome; failing to also clear a stale default
+        # reference shouldn't turn this into an error.
+        pass
+
+    msg = f"Profile '{name}' deleted."
+    if cleared_default:
+        msg += " (it was the default profile — default cleared too.)"
+    return {"ok": True, "message": msg}
 
 
 # ─── SENİN ESKİ SCRIPT İÇERİKLERİNİN BİREBİR TAŞINMIŞ HALİ ───────────────────
@@ -1094,6 +1167,7 @@ OPERATIONS = {
     "write_nvcurve_profile": op_write_nvcurve_profile,
     "set_default_gpu_profile": op_set_default_gpu_profile,
     "run_gpu_autoload": op_run_gpu_autoload,
+    "delete_nvcurve_profile": op_delete_nvcurve_profile,
 
     # Yeni eklenen güvenli operasyon köprüleri:
     "save_power_profile": op_save_power_profile,

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QGridLayout, QLabel, QPushButton, QGroupBox, QLineEdit, QTextEdit,
     QFrame, QSplitter, QTabWidget, QSpinBox, QProgressBar, QSizePolicy,
     QComboBox, QInputDialog, QCheckBox, QScrollArea, QSlider, QColorDialog,
-    QStyle
+    QStyle, QMessageBox
 )
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QScatterSeries
 
@@ -3611,11 +3611,11 @@ except Exception as e:
         info_layout.addWidget(self.gpu_mem_clock)
         info_layout.addStretch()
 
-        # Save Profile As + profile combo live here now, far right of the
-        # status row.
-        self.btn_save_profile = QPushButton("💾 Save Profile As...")
+        # Save As + profile combo live here now, far right of the status row.
+        self.btn_save_profile = QPushButton("💾 Save As")
         self.btn_save_profile.setObjectName("save_button")
         self.btn_save_profile.setFixedHeight(22)
+        self.btn_save_profile.setFixedWidth(80)
         self.btn_save_profile.clicked.connect(self._save_profile_as)
         info_layout.addWidget(self.btn_save_profile)
 
@@ -3625,28 +3625,30 @@ except Exception as e:
         self.profile_combo = QComboBox()
         self.profile_combo.setFixedHeight(22)
         self.profile_combo.setMinimumWidth(150)
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        self.profile_combo.activated.connect(self._on_profile_selected)
         info_layout.addWidget(self.profile_combo)
         layout.addWidget(info_group)
 
-        # Default/Remove toolbar: nvcurve's own `profile default` /
+        # Default/Delete toolbar: nvcurve's own `profile default` /
         # `autoload` mechanism (see root_helper.py op_set_default_gpu_profile
         # / op_run_gpu_autoload). No extra daemon/service — applied once at
-        # tray startup.
+        # tray startup. "Default" is a toggle: click once to mark the
+        # selected profile as default (★ appears in the combo), click again
+        # on the same profile to unmark it.
         profile_toolbar = QHBoxLayout()
         profile_toolbar.addStretch()
 
         self.btn_set_default_profile = QPushButton("⭐ Default")
         self.btn_set_default_profile.setFixedHeight(22)
         self.btn_set_default_profile.setFixedWidth(90)
-        self.btn_set_default_profile.clicked.connect(self._set_default_gpu_profile)
+        self.btn_set_default_profile.clicked.connect(self._toggle_default_gpu_profile)
         profile_toolbar.addWidget(self.btn_set_default_profile)
 
-        self.btn_clear_default_profile = QPushButton("✕ Remove")
-        self.btn_clear_default_profile.setFixedHeight(22)
-        self.btn_clear_default_profile.setFixedWidth(90)
-        self.btn_clear_default_profile.clicked.connect(self._clear_default_gpu_profile)
-        profile_toolbar.addWidget(self.btn_clear_default_profile)
+        self.btn_delete_profile = QPushButton("🗑 Delete")
+        self.btn_delete_profile.setFixedHeight(22)
+        self.btn_delete_profile.setFixedWidth(90)
+        self.btn_delete_profile.clicked.connect(self._delete_gpu_profile)
+        profile_toolbar.addWidget(self.btn_delete_profile)
         layout.addLayout(profile_toolbar)
 
         # Point Info
@@ -3836,11 +3838,20 @@ except Exception as e:
         self._recompute_display()
 
     def _on_point_offset_spin_changed(self, val):
-        if not self.vf_widget.selected_indices:
+        # BUG FIX: this used to loop over self.vf_widget.selected_indices,
+        # which can silently hold more than the one point the user thinks
+        # is selected (e.g. a leftover multi-selection from Select All or a
+        # Space-toggle). Looping over it meant a single point's offset edit
+        # got written to every point still in that set, making it behave
+        # like a second core offset. Point Offset now only ever touches the
+        # single active point (current_index); use Select All + arrow keys
+        # or Flatten for deliberate multi-point edits.
+        idx = self.vf_widget.current_index
+        if idx is None or idx < 0 or idx >= len(self._default_points):
             return
-        for idx in self.vf_widget.selected_indices:
-            point_offset = val - self._core_offset
-            self._point_offsets[idx] = point_offset
+        if idx not in self.vf_widget.selected_indices:
+            return
+        self._point_offsets[idx] = val - self._core_offset
         self._curve_modified = True
         self._update_core_offset_ui()
         self._recompute_display()
@@ -4674,11 +4685,35 @@ except Exception as e:
     # ─── 4. GPU TUNING: APPLY OFFSETS ───────────────────────────────────
     def _apply_gpu_offsets(self):
         profile_name = "ppm"
+
+        if not self._default_points:
+            self._log("❌ No curve loaded yet — read the current curve or load a profile first.")
+            return
+
+        # WYSIWYG: the deltas we send to hardware are derived directly from
+        # what's currently drawn in the V/F graph, not from the
+        # _point_offsets/_core_offset bookkeeping.
+        #
+        # BUG FIX: this used to loop over self._gpu_indices, a list only
+        # ever populated by an actual hardware read (Read Current Curve /
+        # after an apply/reset). Loading a saved profile from the combo
+        # never touched it, so if a profile was loaded first and a point
+        # was then dragged on the graph, self._gpu_indices was still empty
+        # (or stale) and the edit was silently dropped — the previously
+        # saved profile's values effectively stayed in effect on hardware
+        # instead of the graph's edited curve. Reading straight from
+        # self.vf_widget.get_points() means the graph is always the single
+        # source of truth for what gets written.
+        graph_points = self.vf_widget.get_points()
         offsets_to_apply = {}
-        for i in self._gpu_indices:
-            total_offset = self._point_offsets.get(i, 0) + self._core_offset
-            if total_offset != 0:
-                offsets_to_apply[i] = total_offset * 1000
+        for i, (_, freq) in enumerate(graph_points):
+            if i >= len(self._default_base_freqs):
+                break
+            base = self._default_base_freqs[i]
+            delta = int(round(freq)) - base
+            if delta != 0:
+                offsets_to_apply[i] = delta * 1000
+
         mem_off = self.mem_offset_spin.value()
         if mem_off != 0:
             offsets_to_apply[131] = mem_off * 1000
@@ -4968,7 +5003,20 @@ except Exception as e:
 
         self._curve_modified = False
         self._update_core_offset_ui()
-        self._reset_graph_to_last_read()
+
+        # BUG FIX: this used to call _reset_graph_to_last_read(), which was
+        # written for a different purpose (resyncing the graph to the last
+        # actual hardware read after Apply/Read/Reset Curve) and re-derives
+        # state from self._read_offsets with its own branching. Loading a
+        # profile now does its own explicit, unconditional reset instead:
+        # clear any leftover selection and redraw strictly from what was
+        # just computed above, so previously unapplied graph edits (and any
+        # stray multi-selection) never carry over between profiles.
+        self.vf_widget.clear_selection()
+        self._recompute_display()
+        self.point_offset_spin.blockSignals(True)
+        self.point_offset_spin.setValue(0)
+        self.point_offset_spin.blockSignals(False)
         self._log(f"✅ Profile applied to UI: {profile_name} (Core: {self._core_offset}, Mem: {mem_offset})")
 
     def _gather_current_profile_data(self):
@@ -5024,6 +5072,29 @@ except Exception as e:
                 self.profile_combo.setItemText(i, label)
         self.profile_combo.setCurrentIndex(current_idx)
         self.profile_combo.blockSignals(False)
+        # Defensive: force an immediate repaint in case Qt doesn't pick up
+        # the item-text change right away.
+        self.profile_combo.update()
+        # Diagnostic: always log what the backend actually persisted, so
+        # it's visible in the log whether a "Default"/"Delete" click that
+        # doesn't seem to change the ★ is a real backend failure (this line
+        # will show the OLD name) or was already applied (shows the
+        # expected new name).
+        self._log(f"ℹ️ Default GPU profile is now: {default_name or '(none)'}")
+
+    def _toggle_default_gpu_profile(self):
+        """The 'Default' button is now a toggle: click once to mark the
+        currently selected profile as default, click again on that same
+        (already-starred) profile to unmark it."""
+        profile_name = self._strip_default_mark(self.profile_combo.currentText())
+        if not profile_name:
+            self._log("❌ No profile selected.")
+            return
+        current_default = self._read_default_gpu_profile_name()
+        if current_default == profile_name:
+            self._clear_default_gpu_profile()
+        else:
+            self._set_default_gpu_profile()
 
     def _set_default_gpu_profile(self):
         profile_name = self._strip_default_mark(self.profile_combo.currentText())
@@ -5056,6 +5127,33 @@ except Exception as e:
             "Default GPU profile removed.",
             "Could not remove default GPU profile.",
             callback=lambda _: self._refresh_default_star(),
+        )
+
+    def _delete_gpu_profile(self):
+        profile_name = self._strip_default_mark(self.profile_combo.currentText())
+        if not profile_name:
+            self._log("❌ No profile selected to delete.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete profile '{profile_name}'? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        payload = {
+            "op": "delete_nvcurve_profile",
+            "project_dir": project_dir,
+            "name": profile_name,
+        }
+        self._run_root_helper_command(
+            payload,
+            f"Profile '{profile_name}' deleted.",
+            f"Could not delete '{profile_name}'.",
+            callback=lambda _: self._refresh_profile_list(),
         )
 
     # ─── GPU INFORMATION ──────────────────────────────────────────────
