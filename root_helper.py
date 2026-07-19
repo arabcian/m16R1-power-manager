@@ -1263,6 +1263,29 @@ def op_set_cpu_epp_governor(params: dict) -> dict:
     return {"ok": True, "message": msg}
 
 
+_CPU_BOOST_PATH = "/sys/devices/system/cpu/cpufreq/boost"
+
+
+def op_set_cpu_boost(params: dict) -> dict:
+    """Toggles the system-wide CPU boost knob
+    (/sys/devices/system/cpu/cpufreq/boost). Single fixed path, boolean
+    input only — nothing here is free-form data from the client."""
+    enabled = params.get("enabled")
+    if not isinstance(enabled, bool):
+        return {"ok": False, "error": "enabled must be a boolean"}
+
+    if not os.path.isfile(_CPU_BOOST_PATH):
+        return {"ok": False, "error": f"{_CPU_BOOST_PATH} not found (not supported on this kernel/CPU?)"}
+
+    try:
+        with open(_CPU_BOOST_PATH, "w") as f:
+            f.write("1" if enabled else "0")
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+
+    return {"ok": True, "message": f"CPU boost {'enabled' if enabled else 'disabled'}."}
+
+
 # NOT: op_run_script_content, op_apply_gaming_and_pci, op_run_nvctgp ve
 # op_read_gaming_status buradan kaldırıldı. İlk üçü artık ryzenadj-helper
 # (C fast-path, bkz. helper-c/ryzenadj_helper.c) tarafından karşılanıyor;
@@ -1301,6 +1324,7 @@ OPERATIONS = {
 
     # Per-CCD Governor/EPP (CO Live tab)
     "set_cpu_epp_governor": op_set_cpu_epp_governor,
+    "set_cpu_boost": op_set_cpu_boost,
 }
 
 

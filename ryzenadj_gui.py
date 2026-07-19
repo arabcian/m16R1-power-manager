@@ -2805,6 +2805,40 @@ class RyzenAdjGUI(QMainWindow):
 
         # ── Temperatures / Governor ─────────────────────────────────────
         v_live.addLayout(_cosec("TEMPERATURES / GOVERNOR"))
+
+        # Boost is a single system-wide on/off knob
+        # (/sys/devices/system/cpu/cpufreq/boost) — unlike governor/EPP
+        # it isn't per-CCD, so it gets its own row instead of one combo
+        # box per CCD. Replaces the old standalone "BOOST / GOVERNOR"
+        # section, which just displayed this read-only; the governor/EPP
+        # part of that display is now covered by the per-CCD combo boxes
+        # below, so that whole section had nothing left to show.
+        brow = QHBoxLayout()
+        brow.setSpacing(4)
+        brow.setContentsMargins(0, 1, 0, 1)
+        b_lbl = SL("Boost:", color=C_GREEN, size=8)
+        b_lbl.setFixedWidth(46)
+        self._boost_combo = QComboBox()
+        self._boost_combo.addItems(["ON", "OFF"])
+        self._boost_combo.setFixedWidth(70)
+        self._boost_combo.setToolTip("/sys/devices/system/cpu/cpufreq/boost")
+        try:
+            with open("/sys/devices/system/cpu/cpufreq/boost") as f:
+                cur_boost = f.read().strip()
+        except OSError:
+            cur_boost = None
+        if cur_boost is None:
+            self._boost_combo.setEnabled(False)
+        else:
+            self._boost_combo.blockSignals(True)
+            self._boost_combo.setCurrentText("ON" if cur_boost == "1" else "OFF")
+            self._boost_combo.blockSignals(False)
+        self._boost_combo.currentTextChanged.connect(self._on_boost_changed)
+        brow.addWidget(b_lbl)
+        brow.addWidget(self._boost_combo)
+        brow.addStretch()
+        v_live.addLayout(brow)
+
         self._co_temp_rows: dict = {}
         # Standard amd-pstate(-epp) value sets. Not probed from
         # scaling_available_governors — this is the common set on modern
@@ -2960,12 +2994,6 @@ class RyzenAdjGUI(QMainWindow):
             crow.addWidget(lbl_bar, stretch=8)
             v_live.addLayout(crow)
             self._co_live_rows.append((lbl_id, lbl_t0, lbl_t1, lbl_pwr, lbl_bar))
-
-        # ── Boost / Governor / EPP ────────────────────────────────────
-        v_live.addLayout(_cosec("BOOST / GOVERNOR"))
-        self._co_boost_lbl = SL("—", color=C_GREEN, size=8)
-        self._co_boost_lbl.setTextFormat(Qt.RichText)
-        v_live.addWidget(self._co_boost_lbl)
 
         scroll_live.setWidget(inner_live)
         ll.addWidget(scroll_live, 1)
@@ -3233,6 +3261,17 @@ class RyzenAdjGUI(QMainWindow):
             f"{tag}: failed to set EPP.",
         )
 
+    def _on_boost_changed(self, text: str):
+        """Applies the system-wide CPU boost on/off toggle
+        (/sys/devices/system/cpu/cpufreq/boost) via root_helper."""
+        enabled = (text == "ON")
+        self._log(f"⚙️ Setting CPU boost → {text}")
+        self._run_root_helper_command(
+            {"op": "set_cpu_boost", "enabled": enabled},
+            f"CPU boost set to {text}.",
+            "Failed to set CPU boost.",
+        )
+
     def _init_co_live_handles(self):
         """
         Discover hwmon paths at startup and open the persistent file handles.
@@ -3322,20 +3361,12 @@ class RyzenAdjGUI(QMainWindow):
             for i in range(n_phys)
         ]
 
-        # ── Gov / EPP extra paths ─────────────────────────────────
-        extra_paths = [
-            '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor',
-            '/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference',
-            '/sys/devices/system/cpu/cpufreq/boost',   # D4
-        ]
-
         # ── Open all files ─────────────────────────────────────────
         all_paths = (
             [p for _, p in self._co_k10temp_paths]
             + ([self._co_zenergy_socket_path] if self._co_zenergy_socket_path else [])
             + [p for _, p in self._co_zenergy_core_paths]
             + [p for _, p in self._co_freq_paths]
-            + extra_paths
         )
         for path in all_paths:
             if path and path not in self._co_live_handles:
@@ -3534,32 +3565,6 @@ class RyzenAdjGUI(QMainWindow):
                 self._co_set_text(lbl_pwr, "  —  ")
                 self._co_set_color(lbl_pwr, C_VDGREY)
                 self._co_set_text(lbl_bar, "")
-
-        # ── Boost / Gov / EPP ─────────────────────────────────────────
-        boost_raw = self._co_live_read('/sys/devices/system/cpu/cpufreq/boost')
-        boost_on = (boost_raw == "1") if boost_raw is not None else None
-
-        gov_raw = self._co_live_read(
-            '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor')
-        epp_raw = self._co_live_read(
-            '/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference')
-
-        if boost_on is None:
-            b_str = f'<span style="color:{C_VDGREY}">Boost: ?</span>'
-        elif boost_on:
-            b_str = f'<span style="color:{C_GREEN}">Boost: ON</span>'
-        else:
-            b_str = f'<span style="color:{C_STOP}">Boost: OFF</span>'
-
-        sep  = f'<span style="color:{C_VDGREY}"> · </span>'
-        gov  = gov_raw or "?"
-        epp  = epp_raw or "?"
-        self._co_set_text(
-            self._co_boost_lbl,
-            f'{b_str}{sep}'
-            f'<span style="color:{C_GREY}">Gov: {gov}</span>{sep}'
-            f'<span style="color:{C_DGREY}">EPP: {epp}</span>'
-        )
 
     # A1+A2: A single persistent QProcess — no new object is created each call,
     # no leaks; the flag is reset on both finished and errorOccurred.
