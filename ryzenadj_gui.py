@@ -2905,7 +2905,7 @@ class RyzenAdjGUI(QMainWindow):
             # starts, and the Boost combo is set to the same width as the
             # EPP combo so it lines up directly above/below it.
             if tag == "Tctl":
-                b_lbl = SL("Boost:", color=C_GREEN, size=8)
+                b_lbl = SL(" Boost:", color=C_GREEN, size=8)
                 b_lbl.setFixedWidth(104)
                 self._boost_combo.setFixedWidth(90 if _EPP_CHOICES is _EPP_CHOICES_NUMERIC else 130)
                 trow.addWidget(b_lbl)
