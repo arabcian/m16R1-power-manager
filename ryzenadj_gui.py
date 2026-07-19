@@ -2814,7 +2814,7 @@ class RyzenAdjGUI(QMainWindow):
         # with no combo boxes of its own) instead of taking a whole row
         # by itself.
         self._boost_combo = QComboBox()
-        self._boost_combo.addItems(["ON", "OFF"])
+        self._boost_combo.addItems(["on", "off"])
         self._boost_combo.setFixedWidth(70)
         self._boost_combo.setToolTip("/sys/devices/system/cpu/cpufreq/boost")
         try:
