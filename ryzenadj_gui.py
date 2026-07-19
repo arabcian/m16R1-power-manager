@@ -2828,11 +2828,15 @@ class RyzenAdjGUI(QMainWindow):
             self._boost_combo.blockSignals(True)
             self._boost_combo.setCurrentText("ON" if cur_boost == "1" else "OFF")
             self._boost_combo.blockSignals(False)
-        # activated[str] fires on every user selection, even reselecting
-        # the option already showing — unlike currentTextChanged, which
-        # Qt only emits when the displayed text actually changes. See
-        # the same note by the CCD gov/EPP combos below.
-        self._boost_combo.activated[str].connect(self._on_boost_changed)
+        # activated (int index) fires on every user selection, even
+        # reselecting the option already showing — unlike
+        # currentTextChanged, which Qt only emits when the displayed
+        # text actually changes. The activated[str] overload isn't
+        # exposed on every PySide6 build, so we take the plain int
+        # index and resolve it to text ourselves. See the same note by
+        # the CCD gov/EPP combos below.
+        self._boost_combo.activated.connect(
+            lambda idx: self._on_boost_changed(self._boost_combo.itemText(idx)))
 
         self._co_temp_rows: dict = {}
         # Standard amd-pstate(-epp) value sets. Not probed from
@@ -2940,20 +2944,23 @@ class RyzenAdjGUI(QMainWindow):
                     gov_combo.setEnabled(False)
                     epp_combo.setEnabled(False)
 
-                # activated[str] (not currentTextChanged) — Qt only emits
-                # currentTextChanged when the displayed text actually
-                # changes, so reselecting the option already showing
-                # (e.g. clicking "powersave" while "powersave" is
-                # current) fires nothing and the command never gets
-                # re-applied. activated[str] fires on every user pick,
-                # same option or not, which is what we want here since
-                # the underlying sysfs value could have drifted (e.g.
+                # activated (int index), not currentTextChanged — Qt
+                # only emits currentTextChanged when the displayed text
+                # actually changes, so reselecting the option already
+                # showing (e.g. clicking "powersave" while "powersave"
+                # is current) fires nothing and the command never gets
+                # re-applied. activated fires on every user pick, same
+                # option or not, which is what we want here since the
+                # underlying sysfs value could have drifted (e.g.
                 # something else on the system changed it) without the
-                # combo's displayed text changing.
-                gov_combo.activated[str].connect(
-                    lambda text, idx=ccd_idx, t=tag: self._on_ccd_governor_changed(idx, t, text))
-                epp_combo.activated[str].connect(
-                    lambda text, idx=ccd_idx, t=tag: self._on_ccd_epp_changed(idx, t, text))
+                # combo's displayed text changing. The activated[str]
+                # overload isn't exposed on every PySide6 build, so we
+                # take the plain int index and resolve it to text via
+                # itemText ourselves.
+                gov_combo.activated.connect(
+                    lambda idx, c=gov_combo, i=ccd_idx, t=tag: self._on_ccd_governor_changed(i, t, c.itemText(idx)))
+                epp_combo.activated.connect(
+                    lambda idx, c=epp_combo, i=ccd_idx, t=tag: self._on_ccd_epp_changed(i, t, c.itemText(idx)))
 
                 self._ccd_gov_combos[ccd_idx] = gov_combo
                 self._ccd_epp_combos[ccd_idx] = epp_combo
