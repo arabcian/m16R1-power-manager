@@ -2808,16 +2808,11 @@ class RyzenAdjGUI(QMainWindow):
 
         # Boost is a single system-wide on/off knob
         # (/sys/devices/system/cpu/cpufreq/boost) — unlike governor/EPP
-        # it isn't per-CCD, so it gets its own row instead of one combo
-        # box per CCD. Replaces the old standalone "BOOST / GOVERNOR"
-        # section, which just displayed this read-only; the governor/EPP
-        # part of that display is now covered by the per-CCD combo boxes
-        # below, so that whole section had nothing left to show.
-        brow = QHBoxLayout()
-        brow.setSpacing(4)
-        brow.setContentsMargins(0, 1, 0, 1)
-        b_lbl = SL("Boost:", color=C_GREEN, size=8)
-        b_lbl.setFixedWidth(46)
+        # it isn't per-CCD, so there's no per-CCD combo box for it. It
+        # used to get its own dedicated row; now it's folded onto the
+        # Tctl row (right-aligned there, since Tctl is the one temp row
+        # with no combo boxes of its own) instead of taking a whole row
+        # by itself.
         self._boost_combo = QComboBox()
         self._boost_combo.addItems(["ON", "OFF"])
         self._boost_combo.setFixedWidth(70)
@@ -2833,11 +2828,11 @@ class RyzenAdjGUI(QMainWindow):
             self._boost_combo.blockSignals(True)
             self._boost_combo.setCurrentText("ON" if cur_boost == "1" else "OFF")
             self._boost_combo.blockSignals(False)
-        self._boost_combo.currentTextChanged.connect(self._on_boost_changed)
-        brow.addWidget(b_lbl)
-        brow.addWidget(self._boost_combo)
-        brow.addStretch()
-        v_live.addLayout(brow)
+        # activated[str] fires on every user selection, even reselecting
+        # the option already showing — unlike currentTextChanged, which
+        # Qt only emits when the displayed text actually changes. See
+        # the same note by the CCD gov/EPP combos below.
+        self._boost_combo.activated[str].connect(self._on_boost_changed)
 
         self._co_temp_rows: dict = {}
         # Standard amd-pstate(-epp) value sets. Not probed from
@@ -2902,7 +2897,16 @@ class RyzenAdjGUI(QMainWindow):
             trow.addStretch()
 
             # Tctl is the overall control temperature (not per-CCD), so it
-            # gets no combo boxes — only Tccd1/Tccd2 map onto an actual CCD.
+            # gets no per-CCD combo boxes — but it's the row that carries
+            # the Boost on/off combo instead, right-aligned via the
+            # stretch above so it lines up with Tccd1/Tccd2's combo
+            # boxes to its right.
+            if tag == "Tctl":
+                b_lbl = SL("Boost:", color=C_GREEN, size=8)
+                trow.addWidget(b_lbl)
+                trow.addWidget(self._boost_combo)
+
+            # Only Tccd1/Tccd2 map onto an actual CCD.
             if tag in ("Tccd1", "Tccd2"):
                 ccd_idx = 0 if tag == "Tccd1" else 1
                 cpu_list = self._ccd_cpu_lists[ccd_idx][1] if ccd_idx < len(self._ccd_cpu_lists) else []
@@ -2936,9 +2940,19 @@ class RyzenAdjGUI(QMainWindow):
                     gov_combo.setEnabled(False)
                     epp_combo.setEnabled(False)
 
-                gov_combo.currentTextChanged.connect(
+                # activated[str] (not currentTextChanged) — Qt only emits
+                # currentTextChanged when the displayed text actually
+                # changes, so reselecting the option already showing
+                # (e.g. clicking "powersave" while "powersave" is
+                # current) fires nothing and the command never gets
+                # re-applied. activated[str] fires on every user pick,
+                # same option or not, which is what we want here since
+                # the underlying sysfs value could have drifted (e.g.
+                # something else on the system changed it) without the
+                # combo's displayed text changing.
+                gov_combo.activated[str].connect(
                     lambda text, idx=ccd_idx, t=tag: self._on_ccd_governor_changed(idx, t, text))
-                epp_combo.currentTextChanged.connect(
+                epp_combo.activated[str].connect(
                     lambda text, idx=ccd_idx, t=tag: self._on_ccd_epp_changed(idx, t, text))
 
                 self._ccd_gov_combos[ccd_idx] = gov_combo
