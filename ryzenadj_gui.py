@@ -30,6 +30,12 @@ from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis, QScatt
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Directory this script lives in when installed (e.g. /usr/lib/m16R1-power-manager
+# or wherever install.sh actually drops it) — used to find bundled assets like
+# Alien.png regardless of install layout, since hardcoding an install path here
+# would break the moment that path changes.
+SCRIPT_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     import ryzenadj_wrapper as wrapper
 except ImportError:
@@ -2814,7 +2820,7 @@ class RyzenAdjGUI(QMainWindow):
         # with no combo boxes of its own) instead of taking a whole row
         # by itself.
         self._boost_combo = QComboBox()
-        self._boost_combo.addItems(["on", "off"])
+        self._boost_combo.addItems(["ON", "OFF"])
         self._boost_combo.setFixedWidth(70)
         self._boost_combo.setToolTip("/sys/devices/system/cpu/cpufreq/boost")
         try:
@@ -7533,7 +7539,19 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
     app.setFont(get_font(8))
+    # Without an explicit icon, Wayland compositors/taskbars have nothing
+    # to show for this window and fall back to a generic icon (the yellow
+    # placeholder). Setting it on both the QApplication (so anything that
+    # reads the app-wide icon — e.g. alt-tab switchers — picks it up) and
+    # the main window itself covers both cases; SCRIPT_DIR makes this
+    # work regardless of where the app is actually installed.
+    _icon_path = SCRIPT_DIR / "Alien.png"
+    if _icon_path.exists():
+        _app_icon = QIcon(str(_icon_path))
+        app.setWindowIcon(_app_icon)
     w = RyzenAdjGUI()
+    if _icon_path.exists():
+        w.setWindowIcon(_app_icon)
     w.show()
     sys.exit(app.exec())
 
