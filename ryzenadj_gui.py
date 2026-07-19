@@ -2898,15 +2898,16 @@ class RyzenAdjGUI(QMainWindow):
             v_lbl.setFixedWidth(72)
             trow.addWidget(n_lbl)
             trow.addWidget(v_lbl)
-            trow.addStretch()
-
             # Tctl is the overall control temperature (not per-CCD), so it
             # gets no per-CCD combo boxes — but it's the row that carries
-            # the Boost on/off combo instead, right-aligned via the
-            # stretch above so it lines up with Tccd1/Tccd2's combo
-            # boxes to its right.
+            # the Boost on/off combo instead. No stretch before it: the
+            # Boost label sits exactly where Tccd1/Tccd2's governor combo
+            # starts, and the Boost combo is set to the same width as the
+            # EPP combo so it lines up directly above/below it.
             if tag == "Tctl":
                 b_lbl = SL("Boost:", color=C_GREEN, size=8)
+                b_lbl.setFixedWidth(104)
+                self._boost_combo.setFixedWidth(90 if _EPP_CHOICES is _EPP_CHOICES_NUMERIC else 130)
                 trow.addWidget(b_lbl)
                 trow.addWidget(self._boost_combo)
 
