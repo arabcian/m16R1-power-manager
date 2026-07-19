@@ -24,6 +24,22 @@ if _HELPER_DIR not in sys.path:
 
 from tool_paths import find_tool, require_tool  # noqa: E402
 
+# SECURITY: _HELPER_DIR (this file's own, root-owned install directory) is
+# the ONLY value ever used as the nvcurve PYTHONPATH/cwd below. Every
+# op_* that touches nvcurve used to accept a "project_dir" string straight
+# from the (unprivileged) caller's JSON payload and use it verbatim as
+# PYTHONPATH + subprocess cwd for `python3 -m nvcurve ...` — since that
+# directory also becomes sys.path[0] for module resolution, a caller could
+# point it at an attacker-controlled directory containing a fake nvcurve/
+# package and get arbitrary code executed as root the moment root_helper
+# ran `python3 -m nvcurve`. Confirmed exploitable in review. The GUI
+# always sent its own real install directory anyway (there is no
+# legitimate reason for this value to ever differ from _HELPER_DIR, since
+# nvcurve/ is installed right next to root_helper.py — see install.sh),
+# so this is a pure hardening change: any "project_dir" key the client
+# still sends is now silently ignored.
+NVCURVE_PROJECT_DIR = _HELPER_DIR
+
 # ─── Sabit dizin tanımlamaları (FHS'e uygun, kurulum dizininden bağımsız) ──
 #   /etc/ryzenadj-gui/profiles   → güç profilleri (root_helper yazar, GUI okur)
 #   /etc/nvcurve/profiles        → nvcurve GPU V/F eğri profilleri
@@ -40,13 +56,43 @@ VAR_SCRIPTS_DIR = "/var/lib/ryzenadj-gui/scripts"
 # gerektirmeden kendiliğinden sağlanıyor.
 BOOT_DEFAULTS_FILE = "/run/ryzenadj-gui/boot_defaults.json"
 
-# op_run_script_content, script içeriğini doğrudan bu (tmpfs, önyüklemede
-# sıfırlanan) dizinde oluşturup çalıştırıp siliyor — hiçbir zaman kalıcı
-# diske veya kullanıcı tarafından yazılabilir bir yola dokunmuyor.
-ALLOWED_SCRIPTS_DIR = "/run/ryzenadj-gui/scripts"
-
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_PROFILE_BYTES = 256 * 1024  # 256 KB
+
+# SECURITY: fixed, server-side table of the only sysctl/sysfs keys gaming
+# profile application and boot-defaults capture/restore are allowed to
+# touch. This used to be supplied by the CALLER (params["gaming_schema"]
+# / params["tunables"]) — since root_helper runs as root, letting the
+# unprivileged caller choose an arbitrary path meant op_apply_power_profile
+# could be made to write any value to any absolute path matching the
+# tunable charset, and op_capture_boot_defaults could be made to read any
+# file readable by root (e.g. /etc/shadow) and leak it into the
+# world-readable BOOT_DEFAULTS_FILE snapshot. Confirmed exploitable in
+# review. Keep this table in sync with ryzenadj_wrapper.GAMING_TUNABLES /
+# THP_TUNABLES — it is intentionally duplicated (not imported) so this
+# privileged file has no runtime dependency on the unprivileged one.
+GAMING_TUNABLES = {
+    "vm.compaction_proactiveness": {"path": "vm.compaction_proactiveness", "type": "sysctl"},
+    "vm.watermark_boost_factor": {"path": "vm.watermark_boost_factor", "type": "sysctl"},
+    "vm.min_free_kbytes": {"path": "vm.min_free_kbytes", "type": "sysctl"},
+    "vm.watermark_scale_factor": {"path": "vm.watermark_scale_factor", "type": "sysctl"},
+    "vm.swappiness": {"path": "vm.swappiness", "type": "sysctl"},
+    "vm.zone_reclaim_mode": {"path": "vm.zone_reclaim_mode", "type": "sysctl"},
+    "vm.page_lock_unfairness": {"path": "vm.page_lock_unfairness", "type": "sysctl"},
+    "kernel.sched_child_runs_first": {"path": "kernel.sched_child_runs_first", "type": "sysctl"},
+    "kernel.sched_autogroup_enabled": {"path": "kernel.sched_autogroup_enabled", "type": "sysctl"},
+    "kernel.sched_cfs_bandwidth_slice_us": {"path": "kernel.sched_cfs_bandwidth_slice_us", "type": "sysctl"},
+    "lru_gen": {"path": "/sys/kernel/mm/lru_gen/enabled", "type": "file"},
+    "sched_min_base_slice": {"path": "/sys/kernel/debug/sched/min_base_slice_ns", "type": "file"},
+    "sched_migration_cost": {"path": "/sys/kernel/debug/sched/migration_cost_ns", "type": "file"},
+    "sched_nr_migrate": {"path": "/sys/kernel/debug/sched/nr_migrate", "type": "file"},
+}
+THP_TUNABLES = {
+    "thp_enabled": {"path": "/sys/kernel/mm/transparent_hugepage/enabled", "type": "file"},
+    "thp_defrag": {"path": "/sys/kernel/mm/transparent_hugepage/defrag", "type": "file"},
+    "thp_shmem": {"path": "/sys/kernel/mm/transparent_hugepage/shmem_enabled", "type": "file"},
+}
+BOOT_DEFAULTS_TUNABLES = {**GAMING_TUNABLES, **THP_TUNABLES}
 
 
 # ─── MEVCUT VE ÇALIŞAN ORİJİNAL FONKSİYONLARINIZ ───────────────────────────
@@ -141,12 +187,10 @@ def op_set_default_gpu_profile(params: dict) -> dict:
     uygulama, tray açılışında bir kez tetiklenen `nvcurve autoload`
     çağrısıyla (bkz. op_run_gpu_autoload) olur.
     """
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
     name = params.get("name")
     clear = bool(params.get("clear", False))
-
-    if not isinstance(project_dir, str) or not project_dir:
-        return {"ok": False, "error": "project_dir required"}
 
     if not clear:
         if not isinstance(name, str) or not PROFILE_NAME_RE.match(name):
@@ -214,9 +258,9 @@ def op_run_gpu_autoload(params: dict) -> dict:
     bir alt süreçtir. Varsayılan profil ayarlanmamışsa nvcurve zaten
     no-op olarak loglayıp normal (0) çıkış koduyla döner.
     """
-    project_dir = params.get("project_dir")
-    if not isinstance(project_dir, str) or not project_dir:
-        return {"ok": False, "error": "project_dir required"}
+    # SECURITY: ignore any client-supplied project_dir — see
+    # NVCURVE_PROJECT_DIR definition at module top for why.
+    project_dir = NVCURVE_PROJECT_DIR
 
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -242,7 +286,8 @@ def op_delete_nvcurve_profile(params: dict) -> dict:
     autoload`'ın artık var olmayan bir dosyaya işaret etmemesi için
     varsayılan kaydını da temizler.
     """
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
     name = params.get("name")
 
     if not isinstance(name, str) or not PROFILE_NAME_RE.match(name):
@@ -563,35 +608,32 @@ def op_apply_power_profile(params: dict) -> dict:
     extra = cfg.get("extra") or {}
     if extra:
         thp = extra.get("thp", {})
-        for thp_key, sysfs_path in (
-            ("enabled", "/sys/kernel/mm/transparent_hugepage/enabled"),
-            ("defrag", "/sys/kernel/mm/transparent_hugepage/defrag"),
-            ("shmem", "/sys/kernel/mm/transparent_hugepage/shmem_enabled"),
-        ):
-            if thp_key in thp:
-                _write_tunable("file", sysfs_path, thp[thp_key])
+        for thp_key, thp_def in THP_TUNABLES.items():
+            # THP_TUNABLES keys are "thp_enabled"/"thp_defrag"/"thp_shmem";
+            # `extra.thp` uses the shorter "enabled"/"defrag"/"shmem" — map
+            # between them without trusting any path from the client.
+            short_key = thp_key[len("thp_"):]
+            if short_key in thp:
+                _write_tunable(thp_def["type"], thp_def["path"], thp[short_key])
 
-        # Bug fix: extra.gaming sözlüğü {"lru_gen": "5", "vm.swappiness": "10", ...}
-        # gibi İSİM→değer eşlemesi kullanıyor — anahtar gerçek sysfs path'i
-        # DEĞİL. Eskiden burada key.startswith("vm."/"kernel."/"/") ile
-        # path/sysctl ayrımı tahmin edilmeye çalışılıyordu; "lru_gen" ve
-        # "sched_min_base_slice"/"sched_migration_cost"/"sched_nr_migrate"
-        # gibi isimler bu üç kalıptan hiçbirine uymadığı için HİÇBİR ZAMAN
-        # uygulanmıyordu (sessizce atlanıyordu — kullanıcı UI'da "recommended"
-        # değeri görüyordu ama gerçek sistemde hiçbir şey değişmiyordu).
-        # Artık gerçek path/type, wrapper.py'nin gönderdiği gaming_schema
-        # (ryzenadj_wrapper.GAMING_TUNABLES) üzerinden isimle aranıyor.
+        # SECURITY: gaming_schema used to be taken from the caller
+        # (params["gaming_schema"]) — since this whole function runs as
+        # root, that let the caller redirect _write_tunable() at an
+        # arbitrary path (confirmed exploitable in review). The
+        # path/type for every allowed key now comes ONLY from the
+        # server-side GAMING_TUNABLES table (module top); the client can
+        # still choose WHICH of those known keys to set and to what
+        # value, but never WHERE the write goes.
         gaming = extra.get("gaming", {})
-        gaming_schema = params.get("gaming_schema") or {}
         skipped_unknown = []
         for key, value in gaming.items():
             if not value:
                 continue
-            schema_entry = gaming_schema.get(key)
-            if not isinstance(schema_entry, dict) or not schema_entry.get("path"):
+            schema_entry = GAMING_TUNABLES.get(key)
+            if not schema_entry:
                 skipped_unknown.append(key)
                 continue
-            ok, err = _write_tunable(schema_entry.get("type", "file"), schema_entry["path"], value)
+            ok, err = _write_tunable(schema_entry["type"], schema_entry["path"], value)
             if not ok:
                 log_lines.append(f"WARNING: gaming setting '{key}' failed: {err}")
         if skipped_unknown:
@@ -606,13 +648,18 @@ def _read_tunable_value(kind: str, path: str):
     okunamazsa None döner (capture bu durumda o anahtarı atlar)."""
     try:
         if kind == "sysctl":
-            sysctl_path = find_tool("sysctl", root_context=True)
-            if not sysctl_path:
+            # OPT#2: same idea as _write_tunable's D11 fix — read
+            # /proc/sys/<key-with-slashes> directly instead of forking
+            # `sysctl -n <key>`. Helper already runs as root, so the file
+            # is always readable when the key exists.
+            rel = path.replace(".", "/")
+            if ".." in rel.split("/") or rel.startswith("/"):
                 return None
-            result = subprocess.run([sysctl_path, "-n", path], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return None
+            proc_path = "/proc/sys/" + rel
+            if not os.path.exists(proc_path):
+                return None
+            with open(proc_path, "r") as f:
+                return f.read().strip()
         else:
             if not os.path.exists(path):
                 return None
@@ -636,21 +683,20 @@ def op_capture_boot_defaults(params: dict) -> dict:
     if os.path.exists(BOOT_DEFAULTS_FILE):
         return {"ok": True, "message": "Boot defaults already captured this boot, skipping."}
 
-    tunables = params.get("tunables")
-    if not isinstance(tunables, dict):
-        return {"ok": False, "error": "Missing tunables dict"}
-
+    # SECURITY: this used to accept an arbitrary {key: {"path": ..., "type":
+    # ...}} mapping from the caller (params["tunables"]) and read back
+    # whatever path it was given — e.g. {"path": "/etc/shadow", "type":
+    # "file"} would have root read /etc/shadow and then write its contents
+    # into BOOT_DEFAULTS_FILE, which is chmod'd 0644 (world-readable) a few
+    # lines down. That's an arbitrary-root-read-and-leak-to-every-local-user
+    # primitive. Confirmed exploitable in review. Now only the fixed,
+    # server-side BOOT_DEFAULTS_TUNABLES table (module top) is ever read;
+    # the client no longer supplies path/type at all.
     snapshot = {}
-    for key, info in tunables.items():
-        if not isinstance(info, dict):
-            continue
-        path = info.get("path")
-        kind = info.get("type")
-        if not isinstance(path, str) or kind not in ("sysctl", "file"):
-            continue
-        value = _read_tunable_value(kind, path)
+    for key, info in BOOT_DEFAULTS_TUNABLES.items():
+        value = _read_tunable_value(info["type"], info["path"])
         if value is not None:
-            snapshot[key] = {"path": path, "type": kind, "value": value}
+            snapshot[key] = {"path": info["path"], "type": info["type"], "value": value}
 
     try:
         os.makedirs(os.path.dirname(BOOT_DEFAULTS_FILE), exist_ok=True, mode=0o755)
@@ -702,7 +748,8 @@ def op_restore_boot_defaults(params: dict) -> dict:
 
 def op_read_gpu_curve(params: dict) -> dict:
     """_read_gpu_curve içindeki orijinal nvcurve okuma kodu."""
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
 
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -726,9 +773,24 @@ def op_read_gpu_curve(params: dict) -> dict:
 
 def op_apply_gpu_offsets(params: dict) -> dict:
     """_apply_gpu_offsets içindeki orijinal 3 adımlı profil uygulama kodu."""
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
     profile_name = params.get("profile_name")
     profile_data = params.get("profile_data")
+
+    # SECURITY: this profile_name was previously used to build a
+    # filesystem path with NO validation at all — unlike every sibling
+    # nvcurve-profile op (op_write_nvcurve_profile, op_delete_nvcurve_profile,
+    # op_save_power_profile), which all check PROFILE_NAME_RE plus a
+    # resolved-path check. A name like "../../etc/cron.d/x" would write
+    # profile_data (JSON-encoded) to an arbitrary absolute path as root.
+    # Confirmed missing in review; brought in line with the other ops.
+    if not isinstance(profile_name, str) or not PROFILE_NAME_RE.match(profile_name):
+        return {"ok": False, "error": "Invalid profile name"}
+    if not isinstance(profile_data, dict):
+        return {"ok": False, "error": "profile_data must be an object"}
+    if len(json.dumps(profile_data)) > MAX_PROFILE_BYTES:
+        return {"ok": False, "error": "profile_data too large"}
 
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -743,7 +805,9 @@ def op_apply_gpu_offsets(params: dict) -> dict:
 
     # 2. Adım: Profil verisini kaydet ve uygula
     os.makedirs("/etc/nvcurve/profiles", exist_ok=True)
-    profile_path = f"/etc/nvcurve/profiles/{profile_name}.json"
+    profile_path = os.path.join(NVCURVE_PROFILES_DIR, f"{profile_name}.json")
+    if os.path.dirname(os.path.abspath(profile_path)) != os.path.abspath(NVCURVE_PROFILES_DIR):
+        return {"ok": False, "error": "Path traversal detected"}
     with open(profile_path, "w") as f:
         json.dump(profile_data, f, indent=2)
 
@@ -781,7 +845,8 @@ def op_apply_gpu_offsets(params: dict) -> dict:
 
 def op_reset_gpu_curve(params: dict) -> dict:
     """_reset_gpu_curve içindeki orijinal sıfırlama ve kontrol kodu."""
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
 
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -823,7 +888,8 @@ def op_set_vram_memlock(params: dict) -> dict:
     nvmlDeviceSetMemoryLockedClocks çağrısını tetikler (nvidia_oc'nin
     --min-mem-clock/--max-mem-clock ile aynı mekanizma).
     """
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
     min_mhz = params.get("min_mhz")
     max_mhz = params.get("max_mhz")
 
@@ -850,7 +916,8 @@ def op_set_vram_memlock(params: dict) -> dict:
 
 def op_reset_vram_memlock(params: dict) -> dict:
     """VRAM locked-clock kilidini kaldırır (nvcurve `memlock reset`)."""
-    project_dir = params.get("project_dir")
+    # SECURITY: ignore any client-supplied project_dir (see module top).
+    project_dir = NVCURVE_PROJECT_DIR
 
     env = os.environ.copy()
     env["PYTHONPATH"] = project_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -1090,123 +1157,15 @@ def op_revert_cpu_isolation(params: dict) -> dict:
     return {"ok": False, "error": f"After {max_retries} retries, cgroups still exist."}
 
 
-def op_read_gaming_status(params: dict) -> dict:
-    """Reads the current value of each Gaming Optimizations setting as root.
-
-    Several of these settings (sched_min_base_slice, sched_migration_cost,
-    sched_nr_migrate) live under /sys/kernel/debug, which typically
-    requires root just to traverse the directory. Reading them from the
-    unprivileged GUI process always showed "(missing)" even though the
-    files exist. This op does the same read that _refresh_gaming_status
-    used to do directly, but as root.
-
-    Teşhis düzeltmesi: Eskiden herhangi bir okuma hatası tek tip "?" ile
-    gösteriliyordu — bu, örn. lru_gen gibi bir ayarın neden okunamadığını
-    (dosya bu kernelde hiç yok mu? path yanlış mı? sysctl ismi değişmiş
-    mi?) anlamayı imkansız kılıyordu. Artık "?" yerine kısa, ayırt edici
-    bir sebep gösteriliyor: "(no file)", "(no sysctl)", "(perm denied)",
-    ya da beklenmedik bir hata için "(err: ...)".
-    """
-    settings = params.get("settings")
-    if not isinstance(settings, dict):
-        return {"ok": False, "error": "Missing settings dict"}
-
-    values = {}
-    for key, info in settings.items():
-        if not isinstance(info, dict):
-            continue
-        path = info.get("path")
-        kind = info.get("type")
-        if not isinstance(path, str):
-            values[key] = "(no path)"
-            continue
-        try:
-            if kind == "sysctl":
-                sysctl_path = find_tool("sysctl", root_context=True)
-                if not sysctl_path:
-                    values[key] = "(no sysctl)"
-                    continue
-                result = subprocess.run([sysctl_path, "-n", path], capture_output=True, text=True)
-                if result.returncode == 0:
-                    values[key] = result.stdout.strip()
-                else:
-                    err = (result.stderr or "").strip()
-                    values[key] = "(no sysctl)" if "unknown key" in err.lower() else f"(err: {err[:40] or 'sysctl failed'})"
-            else:  # file
-                if not os.path.exists(path):
-                    values[key] = "(no file)"
-                    continue
-                with open(path, "r") as f:
-                    content = f.read().strip()
-                m = re.search(r"\[([^\]]+)\]", content)
-                values[key] = m.group(1) if m else (content or "(empty)")
-        except PermissionError:
-            values[key] = "(perm denied)"
-        except Exception as e:
-            values[key] = f"(err: {e})"[:60]
-
-    return {"ok": True, "values": values}
-
-
-def op_run_script_content(params: dict) -> dict:
-    """K1 düzeltmesi: GUI dinamik olarak ürettiği (gaming ayarları, profil
-    script'i vb.) Python kaynak kodunu artık kendi başına /tmp içine
-    0o755 (dünya-okunur/öngörülebilir yol) bir wrapper olarak yazıp
-    pkexec ile çalıştırmıyor (bu, TOCTOU + yerel yetki yükseltme riski
-    taşıyordu ve ayrıca apply_cpu_isolation/revert_cpu_isolation gibi
-    güvenli op'larla çift bir yol oluşturuyordu).
-
-    Bunun yerine GUI, çalıştırılacak Python kaynak kodunu doğrudan bu
-    op'a 'content' olarak yollar. Dosya YALNIZCA burada, zaten root
-    olan bu süreç tarafından, ALLOWED_SCRIPTS_DIR altında rastgele adlı,
-    0o700 izinli ve root sahipli olarak oluşturulur; çalıştırıldıktan
-    hemen sonra silinir. Böylece hiçbir zaman kullanıcı tarafından
-    yazılabilir/tahmin edilebilir bir yol root ile çalıştırılmaz.
-    """
-    content = params.get("content")
-    if not isinstance(content, str) or not content.strip():
-        return {"ok": False, "error": "Missing script content"}
-    if len(content.encode()) > MAX_PROFILE_BYTES:
-        return {"ok": False, "error": "Script content too large"}
-
-    os.makedirs(ALLOWED_SCRIPTS_DIR, exist_ok=True, mode=0o700)
-    os.chmod(ALLOWED_SCRIPTS_DIR, 0o700)
-
-    fd, script_path = tempfile.mkstemp(prefix="gui_op_", suffix=".py", dir=ALLOWED_SCRIPTS_DIR)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        os.chmod(script_path, 0o700)  # root:root, sadece root çalıştırabilir
-
-        result = subprocess.run(
-            [sys.executable, script_path],
-            capture_output=True, text=True, timeout=120,
-        )
-        output = (result.stdout or "").strip()
-        warnings = (result.stderr or "").strip()
-
-        if result.returncode != 0:
-            err = warnings or output or f"Script exited with code {result.returncode}"
-            return {"ok": False, "error": err}
-
-        message = output
-        if warnings:
-            message = (message + "\n" + warnings) if message else warnings
-        return {"ok": True, "message": message or "Script executed successfully."}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Script timed out after 120 seconds."}
-    finally:
-        try:
-            os.remove(script_path)
-        except OSError:
-            pass
-
-
-# NOT: Eskiden burada path-tabanlı bir `op_run_script` da vardı. GUI'nin
-# tüm çağrıları artık `op_run_script_content`'e taşındığı için (script
-# içeriği doğrudan gönderiliyor, ara dosya yok) path-tabanlı sürüm
-# kullanılmayan/ölü kod haline geldi ve saldırı yüzeyini gereksiz yere
-# büyüttüğü için tamamen kaldırıldı.
+# NOT: op_run_script_content, op_apply_gaming_and_pci, op_run_nvctgp ve
+# op_read_gaming_status buradan kaldırıldı. İlk üçü artık ryzenadj-helper
+# (C fast-path, bkz. helper-c/ryzenadj_helper.c) tarafından karşılanıyor;
+# op_run_script_content'in de GUI'de gerçek bir çağıran kalmamıştı (K1
+# düzeltmesiyle zaten TOCTOU riskini azaltmıştı, ama "root olarak
+# rastgele Python kaynağı çalıştır" ile sonuçlanan bir op'un, hiç
+# kullanılmıyorken allowlist'te durması gereksiz saldırı yüzeyiydi).
+# Daha eskiden burada path-tabanlı bir `op_run_script` da vardı; aynı
+# gerekçeyle o da zamanında kaldırılmıştı.
 
 # ─────────────────────────────────────────────────────────────────
 # İzin Verilenler Listesi (Allowlist)
@@ -1229,8 +1188,6 @@ OPERATIONS = {
     "reset_gpu_curve": op_reset_gpu_curve,
     "set_vram_memlock": op_set_vram_memlock,
     "reset_vram_memlock": op_reset_vram_memlock,
-    "run_script_content": op_run_script_content,
-    "read_gaming_status": op_read_gaming_status,
 
     # CPU izolasyonu (redirect-tasks.sh / revert-tasks.sh yerine)
     "apply_cpu_isolation": op_apply_cpu_isolation,

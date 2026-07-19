@@ -6,17 +6,19 @@
 // yanlışlıkla bir .policy XML'i konmuştu, bu da polkit'in dosyayı
 // syntax hatasıyla reddetmesine yol açardı.
 //
-// Amaç: com.ryzenadj.gui.set-params action'ını (yalnızca
-// /usr/local/lib/ryzenadj-gui/root_helper.py'yi pkexec ile çalıştırmak
-// için kullanılır — bkz. com.ryzenadj.gui.policy'deki
-// org.freedesktop.policykit.exec.path eşleşmesi) admin grubundaki
+// Amaç: com.ryzenadj.gui.set-params (root_helper.py) VE
+// com.ryzenadj.gui.fast-helper (ryzenadj-helper, C fast-path — bkz.
+// helper-c/ryzenadj_helper.c) action'larını admin grubundaki
 // (wheel/sudo) yerel, aktif oturumlar için TAMAMEN parolasız onaylamak.
+// Her ikisi de org.freedesktop.policykit.exec.path ile kendi sabit
+// program yoluna bağlıdır (bkz. com.ryzenadj.gui.policy).
 //
-// Bunun güvenli olmasının nedeni root_helper.py'nin kendisi:
+// Bunun güvenli olmasının nedeni her iki yardımcının da:
 //   - root:root sahipli ve 0700 izinli (kullanıcı okuyup değiştiremez),
-//   - sabit bir allowlist (OPERATIONS dict) dışında hiçbir şey çalıştırmaz,
-//   - her operasyonda path-traversal / isim / boyut doğrulaması yapar.
-// Yani bu kural "her şeye kök erişimi" değil, yalnızca bu tek, denetimli
+//   - sabit bir allowlist (OPERATIONS dict / dispatch switch) dışında
+//     hiçbir şey çalıştırmaması,
+//   - her operasyonda path-traversal / isim / boyut doğrulaması yapması.
+// Yani bu kural "her şeye kök erişimi" değil, yalnızca bu iki, denetimli
 // yardımcı programa parolasız erişim veriyor.
 //
 // Grup adını dağıtımınıza göre ayarlayın: Gentoo/Arch'ta "wheel",
@@ -29,7 +31,8 @@
 // içindeki <allow_active>auth_admin_keep</allow_active> değerine düşer.
 
 polkit.addRule(function(action, subject) {
-    if (action.id == "com.ryzenadj.gui.set-params" &&
+    if ((action.id == "com.ryzenadj.gui.set-params" ||
+         action.id == "com.ryzenadj.gui.fast-helper") &&
         subject.active && subject.local &&
         (subject.isInGroup("wheel") || subject.isInGroup("sudo"))) {
         return polkit.Result.YES;

@@ -177,6 +177,20 @@ find "$APP_DIR/nvcurve" -type f -exec chmod 0644 {} \;
 # 0700 + root sahipliği olmadan bu güven modeli GEÇERSİZ olur.
 install -o root -g root -m 0700 "$SOURCE_DIR/root_helper.py" "$APP_DIR/root_helper.py"
 
+# ryzenadj-helper: C fast-path for apply_gaming_and_pci / run_nvctgp /
+# read_gaming_status (bkz. helper-c/ryzenadj_helper.c). Kaynaktan derlenir;
+# NVCTGP_PATH derleme zamanında $SBIN_DIR ile hizalanır (Python tarafındaki
+# sed ile aynı amaç). root:root, 0700 — root_helper.py ile aynı güven modeli.
+if command -v gcc >/dev/null 2>&1 || command -v cc >/dev/null 2>&1; then
+    info "ryzenadj-helper (C fast-path) derleniyor..."
+    make -C "$SOURCE_DIR/helper-c" clean >/dev/null
+    make -C "$SOURCE_DIR/helper-c" NVCTGP_PATH="$SBIN_DIR/nvctgp"
+    install -o root -g root -m 0700 "$SOURCE_DIR/helper-c/ryzenadj-helper" "$APP_DIR/ryzenadj-helper"
+    ok "ryzenadj-helper derlendi ve kuruldu: $APP_DIR/ryzenadj-helper"
+else
+    warn "gcc/cc bulunamadı — ryzenadj-helper (C fast-path) atlanıyor. Gaming ayarları ve GPU TGP, root_helper.py üzerinden (yavaş yol) çalışmaya devam edecek şekilde GUI'de bir fallback YOKTUR; bu binary olmadan bu üç işlem başarısız olur. gcc kurup kurulumu tekrar çalıştırın."
+fi
+
 # Hardcoded /usr/local/lib path'lerini kurulum diziniyle hizala (ebuild ile aynı sed).
 # Kurulan KOPYALAR üzerinde çalışır — kaynak checkout kirlenmez.
 # (root_helper.py'deki referans yalnızca yorum, işleve etkisi yok — dokunulmadı.)

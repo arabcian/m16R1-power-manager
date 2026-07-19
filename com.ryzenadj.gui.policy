@@ -67,4 +67,29 @@
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/ryzenadj-gui/root_helper.py</annotate>
   </action>
 
+  <!--
+    OPT: narrow C fast-path (ryzenadj-helper) for the small subset of
+    ops that gain something from being a statically-auditable C binary
+    instead of a Python interpreter invocation (apply_gaming_and_pci,
+    run_nvctgp, read_gaming_status — see ryzenadj_helper.c). Everything
+    else still goes through com.ryzenadj.gui.set-params / root_helper.py.
+    Separate action id so each binary's polkit authorization can be
+    reasoned about independently, even though the effective policy
+    (auth_admin_keep fallback + passwordless rule below) is identical.
+  -->
+  <action id="com.ryzenadj.gui.fast-helper">
+    <description>Run the ryzenadj-gui fast-path C helper (gaming tunables, GPU TGP)</description>
+    <description xml:lang="tr">RyzenAdj GUI hızlı C yardımcısını çalıştır (oyun ayarları, GPU TGP)</description>
+    <message>System Administrator Authentication Required (RyzenAdj GUI)</message>
+    <message xml:lang="tr">Sistem Administrator Yetkilendirmesi Gereklidir (RyzenAdj GUI)</message>
+
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/lib/ryzenadj-gui/ryzenadj-helper</annotate>
+  </action>
+
 </policyconfig>

@@ -912,6 +912,7 @@ class TelemetryWorker(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self._stop_event = threading.Event()  # OPT#6: single interruptible wait instead of 20x0.1s polling
         self.last_stat = []
         self.prev_energy = None   # A3: None → just record on the first tick, no spike
         self.prev_time   = None   # A8: we'll use monotonic
@@ -1139,10 +1140,12 @@ class TelemetryWorker(QThread):
                             self.error.emit(f"⚠️ Telemetry loop error: {e}\n{tb}")
                         except Exception:
                             pass
-                for _ in range(20):
-                    if self.isInterruptionRequested():
-                        break
-                    time.sleep(0.1)
+                # OPT#6: single interruptible wait instead of waking up 20
+                # times per cycle just to check a flag — same 2s cadence,
+                # near-zero idle wakeups, and stop() returns instantly.
+                self._stop_event.wait(2.0)
+                if self.isInterruptionRequested():
+                    break
         finally:
             # All persistent handles left open are cleaned up when the thread stops
             self._cleanup_handles()
@@ -1162,6 +1165,7 @@ class TelemetryWorker(QThread):
     def stop(self):
         self.running = False
         self.requestInterruption()
+        self._stop_event.set()
 
 # ─── SYSINFO ──────────────────────────────────────────────────────────
 def read_sys_info() -> dict:
@@ -1608,16 +1612,17 @@ class RyzenAdjGUI(QMainWindow):
             path = info["path"]
             try:
                 if info["type"] == "sysctl":
-                    sysctl_path = find_tool("sysctl")
-                    if not sysctl_path:
-                        local_values[key] = "(no sysctl)"
-                        continue
-                    result = subprocess.run([sysctl_path, "-n", path], capture_output=True, text=True)
-                    if result.returncode == 0:
-                        local_values[key] = result.stdout.strip()
+                    # OPT#2: this used to fork+exec `sysctl -n <key>` once per
+                    # key (12+ processes per refresh, ~5-15ms each). Every
+                    # sysctl key maps 1:1 onto /proc/sys/<dotted.path.as/slashes>,
+                    # so we can read it directly — same result, no subprocess,
+                    # whole refresh now completes in well under 1ms.
+                    proc_path = "/proc/sys/" + path.replace(".", "/")
+                    if os.path.exists(proc_path):
+                        with open(proc_path, "r") as f:
+                            local_values[key] = f.read().strip()
                     else:
-                        err = (result.stderr or "").strip()
-                        local_values[key] = "(no sysctl)" if "unknown key" in err.lower() else "(?)"
+                        local_values[key] = "(no sysctl)"
                 else:
                     if os.path.exists(path):
                         with open(path, "r") as f:
@@ -1649,22 +1654,25 @@ class RyzenAdjGUI(QMainWindow):
         # automatically at startup — so opening the app never triggers a
         # password prompt on its own.
         import threading
-        settings_payload = {
-            key: {"path": self.gaming_widgets[key]["info"]["path"], "type": self.gaming_widgets[key]["info"]["type"]}
-            for key in needs_root_keys
-        }
+        # SECURITY: ryzenadj-helper now resolves path/type itself from a
+        # fixed, server-side table (see helper-c/ryzenadj_helper.c) —
+        # sending path/type here would be ignored, and worse, an older
+        # helper binary that still trusted them would be reintroducing
+        # the arbitrary-file-read bug that table was added to close. We
+        # only ever send the symbolic keys we want read.
+        keys_payload = list(needs_root_keys)
 
         def worker():
             values = {}
             err_msg = None
             try:
-                json_arg = json.dumps({"op": "read_gaming_status", "settings": settings_payload})
+                json_arg = json.dumps({"op": "read_gaming_status", "keys": keys_payload})
                 env = os.environ.copy()
                 for var in ['DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']:
                     if var in os.environ:
                         env[var] = os.environ[var]
                 proc = subprocess.Popen(
-                    ["pkexec", self.ROOT_HELPER_PATH],
+                    ["pkexec", self.FAST_HELPER_PATH],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, env=env,
                 )
@@ -1734,85 +1742,35 @@ class RyzenAdjGUI(QMainWindow):
         self._apply_gaming_settings(self.gaming_settings)
 
     def _apply_gaming_settings(self, settings_dict, thp_settings=None):
-        """Apply gaming settings and THP settings in a single script."""
-        script_lines = ["#!/usr/bin/env python3", "import os, sys, subprocess", ""]
+        """OPT#4 / SECURITY: this used to build a Python *source-code*
+        script by f-string-interpolating each path/value directly into
+        it (sysctl -w '{path}={value}', file writes, setpci via
+        shell=True), then shipped that source to run_script_content to
+        be executed as root. A value containing a quote or newline
+        would silently corrupt the generated script, and the whole
+        approach was a much larger, harder-to-audit root attack surface
+        than it needed to be for what is really just "write some known
+        keys, run three fixed commands".
 
-        # Gaming settings
-        for key, info in settings_dict.items():
-            path = info["path"]
-            value = info["recommended"]
-            if info["type"] == "sysctl":
-                script_lines.append(f"""
-try:
-    result = subprocess.run(['sysctl', '-w', '{path}={value}'], capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"WARNING: {{result.stderr.strip()}}", file=sys.stderr)
-    else:
-        print(result.stdout.strip())
-except Exception as e:
-    print(f"WARNING: Could not set {path}: {{e}}", file=sys.stderr)
-""")
-            else:
-                # File write – first check existence and writability
-                script_lines.append(f"""
-try:
-    if os.path.exists('{path}'):
-        with open('{path}', 'w') as f:
-            f.write('{value}')
-        print(f"OK: {path} -> {value}")
-    else:
-        print(f"WARNING: {path} does not exist, skipping.", file=sys.stderr)
-except Exception as e:
-    print(f"WARNING: Could not write {path}: {{e}}", file=sys.stderr)
-""")
+        It was then changed to send {key: {path, type, value}} to
+        root_helper/ryzenadj-helper — but that still let the CALLER
+        pick the path, which turned out to be exploitable (a malicious
+        payload could point "path" at an arbitrary file). ryzenadj-helper
+        now resolves path/type itself from its own fixed, compiled-in
+        table (see helper-c/ryzenadj_helper.c) and only accepts a
+        symbolic key plus the value to write — so that's all we send.
+        """
+        gaming_payload = {
+            key: info["recommended"]
+            for key, info in settings_dict.items()
+        }
+        thp_payload = {
+            name: thp["value"]
+            for name, thp in (thp_settings or {}).items()
+        }
 
-        # THP settings (same check)
-        if thp_settings:
-            for name, thp in thp_settings.items():
-                path = thp["path"]
-                value = thp["value"]
-                script_lines.append(f"""
-try:
-    if os.path.exists('{path}'):
-        with open('{path}', 'w') as f:
-            f.write('{value}')
-        print(f"OK: {path} -> {value}")
-    else:
-        print(f"WARNING: {path} does not exist, skipping.", file=sys.stderr)
-except Exception as e:
-    print(f"WARNING: Could not write {path}: {{e}}", file=sys.stderr)
-""")
-
-        # PCI latency settings (no change)
-        pci_commands = [
-            "setpci -v -s '*:*' latency_timer=20",
-            "setpci -v -s '0:0' latency_timer=0",
-            "setpci -v -d '*:*:04xx' latency_timer=80",
-        ]
-        for cmd in pci_commands:
-            script_lines.append(f"""
-try:
-    result = subprocess.run("{cmd}", shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"WARNING: {{result.stderr.strip()}}", file=sys.stderr)
-    else:
-        print(result.stdout.strip())
-except Exception as e:
-    print(f"WARNING: Could not run '{cmd}': {{e}}", file=sys.stderr)
-""")
-
-        script_lines.append("print('All settings applied (warnings may have occurred).')")
-        script_content = "\n".join(script_lines)
-
-        # K3: root_helper.py'nin "run_script" op'u artık yalnızca
-        # ALLOWED_SCRIPTS_DIR altında, root sahipli script'leri kabul ediyor
-        # (bkz. root_helper.py K3 notu). GUI tarafından /tmp'ye yazılan bu
-        # geçici, kullanıcı sahipli script o kısıtları geçemez. Bunun
-        # yerine script *içeriğini* doğrudan "run_script_content" op'una
-        # gönderiyoruz; dosya yalnızca zaten root olan root_helper süreci
-        # tarafından, kendi kontrolündeki dizinde oluşturulup çalıştırılıyor.
         self._run_root_helper_command(
-            {"op": "run_script_content", "content": script_content},
+            {"op": "apply_gaming_and_pci", "gaming": gaming_payload, "thp": thp_payload},
             "All settings applied (warnings may have occurred).",
             "Failed to apply settings.",
             callback=lambda out: self._on_gaming_applied(out, None)
@@ -2058,6 +2016,11 @@ except Exception as e:
             self._log("❌ G-MODE disable failed, but mode set to OVERDRIVE.")
 
     ROOT_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/root_helper.py"
+    # OPT: narrow C fast-path for apply_gaming_and_pci / run_nvctgp /
+    # read_gaming_status — see helper-c/ryzenadj_helper.c. Everything
+    # else keeps going through ROOT_HELPER_PATH.
+    FAST_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/ryzenadj-helper"
+    FAST_HELPER_OPS = {"apply_gaming_and_pci", "run_nvctgp", "read_gaming_status"}
 
     def _reload_alienware_wmi(self, force_gmode, callback):
         """Unloads and reloads the Alienware-WMI module."""
@@ -2328,13 +2291,15 @@ except Exception as e:
 
     def _execute_via_root_helper(self, payload_dict):
         """
-        Runs all root operations centrally through root_helper.py, to
+        Runs root operations through root_helper.py (or, for the narrow
+        FAST_HELPER_OPS subset, through the C fast-path binary) to
         trigger the Polkit cache (auth_admin_keep).
         """
+        helper_path = self.FAST_HELPER_PATH if payload_dict.get("op") in self.FAST_HELPER_OPS else self.ROOT_HELPER_PATH
         try:
             payload = json.dumps(payload_dict)
             process = subprocess.Popen(
-                ["pkexec", self.ROOT_HELPER_PATH],
+                ["pkexec", helper_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2362,6 +2327,11 @@ except Exception as e:
 
     def _run_root_helper_command(self, payload_dict, success_msg, fail_msg, callback=None):
         import threading
+        # OPT: apply_gaming_and_pci / run_nvctgp / read_gaming_status go
+        # through the small C helper (see helper-c/ryzenadj_helper.c);
+        # everything else keeps going through root_helper.py.
+        helper_path = self.FAST_HELPER_PATH if payload_dict.get("op") in self.FAST_HELPER_OPS else self.ROOT_HELPER_PATH
+
         def worker():
             proc = None   # D2: pre-defined to avoid a NameError risk
             try:
@@ -2377,7 +2347,7 @@ except Exception as e:
                 # this triggers the same polkit action as G-MODE, and the auth cache
                 # is shared across all operations.
                 proc = subprocess.Popen(
-                    ["pkexec", self.ROOT_HELPER_PATH],
+                    ["pkexec", helper_path],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -3100,6 +3070,12 @@ except Exception as e:
         self._co_zenergy_core_paths:  list = []   # [(ecore_idx, path)]
         self._co_freq_paths:          list = []   # [(cpu_idx, path)]
         self._co_core_topology:       list = []   # [(core_id, [cpu_idx, ...])]
+        # OPT#3: counts consecutive _update_co_live ticks where every known
+        # hwmon path failed to read. hwmon indices (hwmon0, hwmon1, ...) are
+        # not stable across a zenergy module reload or suspend/resume, so a
+        # stale absolute path silently going dead used to leave every panel
+        # showing "—" until the user restarted the app. See _co_live_rediscover().
+        self._co_live_fail_streak = 0
 
         # ── k10temp ─────────────────────────────────────────────────
         k10_dir = self._find_hwmon_by_name('k10temp')
@@ -3191,6 +3167,24 @@ except Exception as e:
                 except Exception:
                     self._co_live_handles[path] = None
 
+    def _co_live_rediscover(self):
+        """OPT#3: close any stale handles and re-run hwmon discovery from
+        scratch. Called when every tracked hwmon path has failed for
+        several consecutive ticks in a row (see _update_co_live), which
+        happens after a zenergy module reload or a suspend/resume that
+        renumbers /sys/class/hwmon/hwmonN."""
+        for fh in list(self._co_live_handles.values()):
+            if fh:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+        self._co_live_handles.clear()
+        self._co_live_socket_prev = None
+        self._co_live_core_prev = {}
+        self._init_co_live_handles()
+        self._log("🔄 CO Live: hwmon paths re-discovered after read failures.")
+
     def _co_live_read(self, path: str) -> str | None:
         """Reads via seek(0) through the persistent handle; returns None on error."""
         fh = self._co_live_handles.get(path)
@@ -3235,6 +3229,12 @@ except Exception as e:
 
         now = time.monotonic()
 
+        # OPT#3: tracks whether *any* known hwmon path read successfully
+        # this tick, to detect a stale-hwmon-numbering situation (see
+        # _co_live_rediscover).
+        had_known_paths = bool(self._co_k10temp_paths or self._co_zenergy_socket_path)
+        any_read_ok = False
+
         # ── Temperatures (k10temp) ────────────────────────────────────
         for tag, path in self._co_k10temp_paths:
             v_lbl = self._co_temp_rows.get(tag)
@@ -3244,6 +3244,7 @@ except Exception as e:
             if raw is None:
                 self._co_set_text(v_lbl, "—")
                 continue
+            any_read_ok = True
             try:
                 temp = int(raw) / 1000.0
             except ValueError:
@@ -3258,6 +3259,7 @@ except Exception as e:
         if self._co_zenergy_socket_path:
             raw = self._co_live_read(self._co_zenergy_socket_path)
             if raw is not None:
+                any_read_ok = True
                 try:
                     joules = int(raw) / 1_000_000
                     prev = self._co_live_socket_prev
@@ -3276,6 +3278,20 @@ except Exception as e:
         if socket_watt > 0 or avg_w > 0:
             self._co_set_text(self._co_pwr_cur, f"{socket_watt:.1f} W")
             self._co_set_text(self._co_pwr_avg, f"avg: {avg_w:.1f} W")
+
+        # OPT#3: if we have paths we expect to work but every one of them
+        # failed for 5 straight ticks (~5s), the hwmon numbering has almost
+        # certainly shifted underneath us — re-discover instead of showing
+        # "—" until the app is restarted.
+        if had_known_paths:
+            if any_read_ok:
+                self._co_live_fail_streak = 0
+            else:
+                self._co_live_fail_streak += 1
+                if self._co_live_fail_streak >= 5:
+                    self._co_live_fail_streak = 0
+                    self._co_live_rediscover()
+                    return
 
         # ── Per-Core Power (zenergy Ecore*) ──────────────────────────
         # dict keyed by Ecore index order; matched up against the topology order
@@ -3373,6 +3389,10 @@ except Exception as e:
     _CPPC_RE = None  # B8: module-global regex (lazy init)
 
     def _fetch_cppc(self):
+        # OPT#7: matches the isVisible() guard _update_co_live already has —
+        # no reason to spawn corefreq-cli every 3s while minimized/hidden.
+        if not self.isVisible():
+            return
         if self._cppc_fetching:
             return
         self._cppc_fetching = True
@@ -3868,33 +3888,16 @@ except Exception as e:
     # ─── GPU TUNING METHODS ─────────────────────────────────────────────
 
     def _apply_gpu_tgp(self):
-        """Seçilen TGP değerini /usr/local/sbin/nvctgp betiği üzerinden uygular."""
+        """OPT#9: seçilen TGP değerini artık yapılandırılmış bir op
+        (run_nvctgp) ile uyguluyor. Eskiden burada nvctgp'yi çağıran bir
+        Python script kaynak kodu üretilip run_script_content'e
+        gönderiliyordu — tek bir komut için üç katman (GUI -> root_helper
+        -> üretilmiş script -> nvctgp) gerektiriyordu."""
         target_watt = self.tgp_slider.value()
         self._log(f"⚙️ GPU TGP {target_watt}W olarak ayarlanıyor...")
 
-        # root_helper.py bu içeriği Python olarak çalıştıracağı için subprocess kullanıyoruz.
-        script_content = f"""
-import subprocess
-import sys
-
-try:
-    # nvctgp <watt> komutunu çalıştır
-    result = subprocess.run(['/usr/local/sbin/nvctgp', '{target_watt}'], capture_output=True, text=True)
-
-    if result.returncode != 0:
-        # Hata durumunda stderr veya stdout'u yakala ve root_helper'a WARNING olarak ilet
-        error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
-        print(f"WARNING: nvctgp hatası (Kod {{result.returncode}}): {{error_msg}}", file=sys.stderr)
-        sys.exit(result.returncode)
-    else:
-        # Başarılı olduğunda çıktıyı logla
-        print(f"OK: {{result.stdout.strip()}}")
-except Exception as e:
-    print(f"WARNING: nvctgp çalıştırılamadı: {{e}}", file=sys.stderr)
-    sys.exit(1)
-"""
         self._run_root_helper_command(
-            {"op": "run_script_content", "content": script_content},
+            {"op": "run_nvctgp", "watts": target_watt},
             f"GPU TGP başarıyla {target_watt}W olarak ayarlandı.",
             "GPU TGP ayarlanırken hata oluştu.",
             callback=None
@@ -4996,62 +4999,81 @@ except Exception as e:
             self._log(f"✔ '{name_clean}.json' saved.")
 
     def _apply_profile(self, name: str):
-        """Made the profile-apply operation crash-safe (try-except)."""
+        """OPT#1: wrapper.apply_profile() blocks on pkexec (up to 30s), plus
+        boot-defaults capture/restore calls (up to 10s each) — previously
+        all ran directly on the GUI thread, freezing the whole window
+        (including the polkit auth prompt) for the duration. Now the whole
+        sequence runs in a worker thread, matching the pattern already used
+        by _run_root_helper_command; every widget touch is marshalled back
+        with QTimer.singleShot(0, ...).
+        """
         if self._busy:
             return
         self._busy = True
         self.btn_save.setEnabled(False)
-        try:
-            # Boot-defaults: custom/gmode'a girmeden ÖNCE (henüz bu ayarlar
-            # değiştirilmemişken) mevcut değerleri yakala; sade bir profile
-            # dönülüyorsa apply'dan SONRA o değerlere geri dön. Her ikisi de
-            # bu önyükleme için zaten yapıldıysa/gerek yoksa no-op'tur.
-            if name in wrapper.TUNING_PROFILES:
-                wrapper.ensure_boot_defaults_captured()
 
-            self._log(f"Applying {name} from GUI...")
-            success = wrapper.apply_profile(name)
-            if success:
-                tray_notified = wrapper.set_active_profile_state(name)
-                self.current = name
-                self._active_profile = name
-                self._update_profile_buttons()
-                self._log(f"✅ {name} profile applied.")
+        import threading
 
-                if name in wrapper.SIMPLE_PROFILES:
-                    wrapper.restore_boot_defaults()
-                    self._log(f"↩ Restored boot-time defaults for gaming/THP tunables.")
+        def worker():
+            tray_notified = False
+            try:
+                # Boot-defaults: custom/gmode'a girmeden ÖNCE (henüz bu ayarlar
+                # değiştirilmemişken) mevcut değerleri yakala; sade bir profile
+                # dönülüyorsa apply'dan SONRA o değerlere geri dön. Her ikisi de
+                # bu önyükleme için zaten yapıldıysa/gerek yoksa no-op'tur.
+                if name in wrapper.TUNING_PROFILES:
+                    wrapper.ensure_boot_defaults_captured()
 
-                # Bildirim popup'ı yalnızca tray ÇALIŞMIYORSA burada
-                # gösterilir. Tray çalışıyorsa write_active_profile()
-                # zaten ona push bildirimi gönderdi ve tray kendi
-                # notify-send'ini gösterecek (bkz. ryzenadj_tray.py::
-                # _on_profile_pushed) — iki yerden birden göstermek
-                # aynı bildirimi ikiletiyordu.
-                if not tray_notified:
+                self._log(f"Applying {name} from GUI...")
+                success = wrapper.apply_profile(name)
+                if success:
+                    tray_notified = wrapper.set_active_profile_state(name)
+
+                    def on_success():
+                        self.current = name
+                        self._active_profile = name
+                        self._update_profile_buttons()
+                        self._log(f"✅ {name} profile applied.")
+                    QTimer.singleShot(0, self, on_success)
+
+                    if name in wrapper.SIMPLE_PROFILES:
+                        wrapper.restore_boot_defaults()
+                        self._log("↩ Restored boot-time defaults for gaming/THP tunables.")
+
+                    # Bildirim popup'ı yalnızca tray ÇALIŞMIYORSA burada
+                    # gösterilir. Tray çalışıyorsa write_active_profile()
+                    # zaten ona push bildirimi gönderdi ve tray kendi
+                    # notify-send'ini gösterecek (bkz. ryzenadj_tray.py::
+                    # _on_profile_pushed) — iki yerden birden göstermek
+                    # aynı bildirimi ikiletiyordu.
+                    if not tray_notified:
+                        try:
+                            subprocess.run(
+                                ["notify-send", "--app-name=RyzenAdj", "--icon=preferences-system-power",
+                                 "Profile Applied", f"Switched to {name}"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
+                            )
+                        except Exception:
+                            pass
+                else:
+                    self._log(f"❌ Failed to apply {name}.")
                     try:
                         subprocess.run(
-                            ["notify-send", "--app-name=RyzenAdj", "--icon=preferences-system-power",
-                             "Profile Applied", f"Switched to {name}"],
+                            ["notify-send", "--app-name=RyzenAdj", "--icon=dialog-error",
+                             "Apply Failed", f"Could not apply {name}"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
                         )
                     except Exception:
                         pass
-            else:
-                self._log(f"❌ Failed to apply {name}.")
-                try:
-                    subprocess.run(
-                        ["notify-send", "--app-name=RyzenAdj", "--icon=dialog-error",
-                         "Apply Failed", f"Could not apply {name}"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1
-                    )
-                except Exception:
-                    pass
-        except Exception as e:
-            self._log(f"❌ Error applying {name}: {e}")
-        finally:
-            self._busy = False
-            self.btn_save.setEnabled(True)
+            except Exception as e:
+                self._log(f"❌ Error applying {name}: {e}")
+            finally:
+                def done():
+                    self._busy = False
+                    self.btn_save.setEnabled(True)
+                QTimer.singleShot(0, self, done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _check_watcher(self):
         """Watchdog callback: protects the watcher and also prevents the icon from disappearing."""
@@ -5392,6 +5414,9 @@ except Exception as e:
 
     # ─── GPU INFORMATION ──────────────────────────────────────────────
     def _update_gpu_info(self):
+        # OPT#7: matches the isVisible() guard _update_co_live already has.
+        if not self.isVisible():
+            return
         if hasattr(self, 'nvml_available') and self.nvml_available and hasattr(self, 'nvml_handle'):
             try:
                 nvml = self._nvml  # B9: cached; no import overhead
