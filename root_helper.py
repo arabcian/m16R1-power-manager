@@ -1157,6 +1157,112 @@ def op_revert_cpu_isolation(params: dict) -> dict:
     return {"ok": False, "error": f"After {max_retries} retries, cgroups still exist."}
 
 
+# Fixed whitelists for the per-CCD governor/EPP combo boxes (CO Live tab).
+# Unlike the gaming-tunable paths fixed earlier in this file, there's no
+# free-form "path" here to lock down — the path is built purely from a
+# bounded integer CPU index, so there's nothing for a caller to redirect.
+# The value whitelists below exist so a typo or a stale/odd client can
+# never end up writing some arbitrary string into a governor/EPP sysfs
+# node (harmless in practice — the kernel would just reject an unknown
+# governor/EPP string — but rejecting client-side is clearer than
+# relying on the kernel to say no).
+_CPU_GOVERNOR_WHITELIST = {"performance", "powersave", "schedutil", "ondemand", "conservative"}
+
+# energy_performance_preference is named strings on most amd-pstate-epp
+# systems, but some kernel/driver combos expose it as a raw 0-255
+# integer instead (0 = most performance-hungry, 255 = most power-saving)
+# — accept both forms; _is_valid_epp() is the single gate either way.
+_CPU_EPP_NAMED_WHITELIST = {"performance", "balance_performance", "balance_power", "power"}
+
+
+def _is_valid_epp(value) -> bool:
+    if value in _CPU_EPP_NAMED_WHITELIST:
+        return True
+    if isinstance(value, bool):
+        return False  # bool is an int subclass — exclude explicitly, same reasoning as the cpu-index check below
+    if isinstance(value, int):
+        return 0 <= value <= 255
+    if isinstance(value, str) and value.isdigit():
+        return 0 <= int(value) <= 255
+    return False
+
+
+_MAX_CPU_INDEX = 1023  # generous upper bound; real systems are nowhere near this
+
+
+def op_set_cpu_epp_governor(params: dict) -> dict:
+    """Sets scaling_governor and/or energy_performance_preference for a
+    list of logical CPUs — used by the CO Live tab's per-CCD Governor/EPP
+    combo boxes (Tccd1/Tccd2 rows). The GUI determines which CPUs belong
+    to which CCD by reading (unprivileged, read-only) L3-cache topology
+    and sends that CPU list here; this op only ever writes to
+    /sys/devices/system/cpu/cpu<N>/cpufreq/{scaling_governor,
+    energy_performance_preference} for N in that list.
+    """
+    cpus = params.get("cpus")
+    governor = params.get("governor")
+    epp = params.get("epp")
+
+    if not isinstance(cpus, list) or not cpus:
+        return {"ok": False, "error": "cpus must be a non-empty list"}
+    if len(cpus) > _MAX_CPU_INDEX:
+        return {"ok": False, "error": "cpus list implausibly large"}
+    if governor is None and epp is None:
+        return {"ok": False, "error": "Nothing to set (governor and epp both missing)"}
+    if governor is not None and governor not in _CPU_GOVERNOR_WHITELIST:
+        return {"ok": False, "error": f"Invalid governor: {governor!r}"}
+    if epp is not None and not _is_valid_epp(epp):
+        return {"ok": False, "error": f"Invalid epp: {epp!r}"}
+
+    ok_count = 0
+    warnings = []
+    for cpu in cpus:
+        # bool is a subclass of int in Python — explicitly excluded so
+        # `true`/`false` in the JSON payload can't sneak through as 0/1.
+        if isinstance(cpu, bool) or not isinstance(cpu, int) or cpu < 0 or cpu > _MAX_CPU_INDEX:
+            warnings.append(f"skipped invalid cpu index: {cpu!r}")
+            continue
+
+        base = f"/sys/devices/system/cpu/cpu{cpu}/cpufreq"
+        applied_this_cpu = True
+
+        if governor is not None:
+            gov_path = f"{base}/scaling_governor"
+            if os.path.isfile(gov_path):
+                try:
+                    with open(gov_path, "w") as f:
+                        f.write(governor)
+                except OSError as e:
+                    applied_this_cpu = False
+                    warnings.append(f"cpu{cpu} governor: {e}")
+            else:
+                applied_this_cpu = False
+                warnings.append(f"cpu{cpu}: no scaling_governor (offline/missing cpufreq policy?)")
+
+        if epp is not None:
+            epp_path = f"{base}/energy_performance_preference"
+            if os.path.isfile(epp_path):
+                try:
+                    with open(epp_path, "w") as f:
+                        f.write(str(epp))
+                except OSError as e:
+                    applied_this_cpu = False
+                    warnings.append(f"cpu{cpu} epp: {e}")
+            else:
+                applied_this_cpu = False
+                warnings.append(f"cpu{cpu}: no energy_performance_preference (driver not amd-pstate-epp?)")
+
+        if applied_this_cpu:
+            ok_count += 1
+
+    msg = f"Applied to {ok_count}/{len(cpus)} CPUs."
+    if warnings:
+        msg += "\n" + "\n".join(warnings[:10])
+        if len(warnings) > 10:
+            msg += f"\n(+{len(warnings) - 10} more)"
+    return {"ok": True, "message": msg}
+
+
 # NOT: op_run_script_content, op_apply_gaming_and_pci, op_run_nvctgp ve
 # op_read_gaming_status buradan kaldırıldı. İlk üçü artık ryzenadj-helper
 # (C fast-path, bkz. helper-c/ryzenadj_helper.c) tarafından karşılanıyor;
@@ -1192,6 +1298,9 @@ OPERATIONS = {
     # CPU izolasyonu (redirect-tasks.sh / revert-tasks.sh yerine)
     "apply_cpu_isolation": op_apply_cpu_isolation,
     "revert_cpu_isolation": op_revert_cpu_isolation,
+
+    # Per-CCD Governor/EPP (CO Live tab)
+    "set_cpu_epp_governor": op_set_cpu_epp_governor,
 }
 
 

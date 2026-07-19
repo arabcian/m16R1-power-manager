@@ -2803,9 +2803,58 @@ class RyzenAdjGUI(QMainWindow):
             row.addWidget(ln, stretch=1)
             return row
 
-        # ── Temperatures ──────────────────────────────────────────────
-        v_live.addLayout(_cosec("TEMPERATURES"))
+        # ── Temperatures / Governor ─────────────────────────────────────
+        v_live.addLayout(_cosec("TEMPERATURES / GOVERNOR"))
         self._co_temp_rows: dict = {}
+        # Standard amd-pstate(-epp) value sets. Not probed from
+        # scaling_available_governors — this is the common set on modern
+        # AMD laptops/desktops running amd_pstate=active; if a given
+        # system exposes a narrower set, picking an unsupported one below
+        # will simply have the write rejected/ignored the same way a
+        # manual `echo` would.
+        _GOV_CHOICES = ["performance", "powersave", "schedutil"]
+
+        # energy_performance_preference is exposed as named strings on
+        # most amd-pstate-epp systems, but some kernel/driver combos
+        # (older amd-pstate builds, or acpi-cpufreq's EPB-backed shim)
+        # expose it as a raw 0-255 integer instead — 0 is the most
+        # performance-hungry end, 255 the most power-saving. Detect once
+        # (from whatever CPU we can read) and offer whichever form the
+        # running kernel actually understands, rather than presenting
+        # named strings that would just be rejected as invalid on those
+        # systems.
+        _EPP_CHOICES_NAMED = ["performance", "balance_performance", "balance_power", "power"]
+        _EPP_CHOICES_NUMERIC = ["0", "32", "64", "96", "128", "160", "192", "224", "255"]
+
+        # Read-only CCD topology so the two combo boxes each target the
+        # right set of logical CPUs. k10temp's Tccd1/Tccd2 labels are
+        # numbered in the same ascending-die order as this grouping (Tccd1
+        # = first/lowest-numbered CCD, Tccd2 = second), which holds on
+        # every 2-CCD Zen part including the 7845HX.
+        self._ccd_cpu_lists = self._detect_ccd_cpu_lists()
+        self._ccd_gov_combos: dict = {}
+        self._ccd_epp_combos: dict = {}
+
+        def _read_current(cpu_idx, filename):
+            try:
+                with open(f"/sys/devices/system/cpu/cpu{cpu_idx}/cpufreq/{filename}") as f:
+                    return f.read().strip()
+            except OSError:
+                return None
+
+        # Determine numeric-vs-named EPP once, from the first readable
+        # CPU across any detected CCD (this is a kernel/driver-wide
+        # property, not a per-CCD one).
+        _EPP_CHOICES = _EPP_CHOICES_NAMED
+        for _, _cpus in self._ccd_cpu_lists:
+            if not _cpus:
+                continue
+            _probe_epp = _read_current(_cpus[0], "energy_performance_preference")
+            if _probe_epp is not None:
+                if _probe_epp.isdigit():
+                    _EPP_CHOICES = _EPP_CHOICES_NUMERIC
+                break
+
         for tag in ["Tctl", "Tccd1", "Tccd2"]:
             trow = QHBoxLayout()
             trow.setSpacing(4)
@@ -2817,6 +2866,53 @@ class RyzenAdjGUI(QMainWindow):
             trow.addWidget(n_lbl)
             trow.addWidget(v_lbl)
             trow.addStretch()
+
+            # Tctl is the overall control temperature (not per-CCD), so it
+            # gets no combo boxes — only Tccd1/Tccd2 map onto an actual CCD.
+            if tag in ("Tccd1", "Tccd2"):
+                ccd_idx = 0 if tag == "Tccd1" else 1
+                cpu_list = self._ccd_cpu_lists[ccd_idx][1] if ccd_idx < len(self._ccd_cpu_lists) else []
+
+                gov_combo = QComboBox()
+                gov_combo.addItems(_GOV_CHOICES)
+                gov_combo.setFixedWidth(104)
+                gov_combo.setToolTip(f"{tag} (CCD{ccd_idx}) — scaling_governor")
+
+                epp_combo = QComboBox()
+                epp_combo.addItems(_EPP_CHOICES)
+                epp_combo.setFixedWidth(90 if _EPP_CHOICES is _EPP_CHOICES_NUMERIC else 130)
+                epp_tooltip_kind = "numeric 0-255" if _EPP_CHOICES is _EPP_CHOICES_NUMERIC else "named"
+                epp_combo.setToolTip(f"{tag} (CCD{ccd_idx}) — energy_performance_preference ({epp_tooltip_kind})")
+
+                if cpu_list:
+                    cur_gov = _read_current(cpu_list[0], "scaling_governor")
+                    cur_epp = _read_current(cpu_list[0], "energy_performance_preference")
+                    gov_combo.blockSignals(True)
+                    if cur_gov in _GOV_CHOICES:
+                        gov_combo.setCurrentText(cur_gov)
+                    gov_combo.blockSignals(False)
+                    epp_combo.blockSignals(True)
+                    if cur_epp in _EPP_CHOICES:
+                        epp_combo.setCurrentText(cur_epp)
+                    epp_combo.blockSignals(False)
+                else:
+                    # Topology couldn't be read (non-AMD, cache info
+                    # missing, ...) — leave the combos there but disabled
+                    # rather than silently pretending they'd do something.
+                    gov_combo.setEnabled(False)
+                    epp_combo.setEnabled(False)
+
+                gov_combo.currentTextChanged.connect(
+                    lambda text, idx=ccd_idx, t=tag: self._on_ccd_governor_changed(idx, t, text))
+                epp_combo.currentTextChanged.connect(
+                    lambda text, idx=ccd_idx, t=tag: self._on_ccd_epp_changed(idx, t, text))
+
+                self._ccd_gov_combos[ccd_idx] = gov_combo
+                self._ccd_epp_combos[ccd_idx] = epp_combo
+
+                trow.addWidget(gov_combo)
+                trow.addWidget(epp_combo)
+
             v_live.addLayout(trow)
             self._co_temp_rows[tag] = v_lbl
 
@@ -3055,6 +3151,87 @@ class RyzenAdjGUI(QMainWindow):
         except Exception:
             pass
         return None
+
+    def _detect_ccd_cpu_lists(self):
+        """Read-only CCD topology detection for the per-CCD Governor/EPP
+        combo boxes: groups logical CPUs by shared L3 cache (one CCD =
+        one L3 slice on Zen). Same approach root_helper.py's
+        op_apply_cpu_isolation uses for CCX/CCD splitting, but read-only
+        (no root needed — /sys/devices/system/cpu/cpu*/cache/index3/
+        shared_cpu_list is world-readable) and returns CPU index LISTS
+        instead of writing anything.
+
+        Returns a list of (ccd_index, [cpu_idx, ...]) sorted by each
+        group's lowest core number, e.g. [(0, [0..11]), (1, [12..23])]
+        on a 2-CCD/24-thread part. Empty list if topology can't be read
+        (e.g. non-AMD / cache info unavailable) — callers should handle
+        that by simply not showing the combo boxes.
+        """
+        shared_lists = set()
+        for p in glob.glob("/sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list"):
+            try:
+                with open(p) as f:
+                    shared_lists.add(f.read().strip())
+            except OSError:
+                continue
+
+        def _first_core_num(shared_cpu_list: str) -> int:
+            try:
+                first_token = shared_cpu_list.split(",")[0].split("-")[0]
+                return int(first_token)
+            except (ValueError, IndexError):
+                return 1 << 30
+
+        def _expand(shared_cpu_list: str) -> list:
+            cpus = []
+            for part in shared_cpu_list.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    try:
+                        lo, hi = part.split("-", 1)
+                        cpus.extend(range(int(lo), int(hi) + 1))
+                    except ValueError:
+                        continue
+                else:
+                    try:
+                        cpus.append(int(part))
+                    except ValueError:
+                        continue
+            return cpus
+
+        ordered = sorted(shared_lists, key=_first_core_num)
+        return [(i, _expand(cpu_list)) for i, cpu_list in enumerate(ordered)]
+
+    def _on_ccd_governor_changed(self, ccd_idx: int, tag: str, governor: str):
+        """Applies the chosen scaling_governor to every logical CPU in
+        this CCD (see _detect_ccd_cpu_lists). Writing to
+        /sys/devices/system/cpu/cpuN/cpufreq/scaling_governor needs root,
+        so this goes through root_helper's set_cpu_epp_governor op —
+        same worker-thread + pkexec pattern as every other privileged
+        action in this file."""
+        cpu_list = self._ccd_cpu_lists[ccd_idx][1] if ccd_idx < len(self._ccd_cpu_lists) else []
+        if not cpu_list:
+            return
+        self._log(f"⚙️ {tag} (CCD{ccd_idx}): setting governor → {governor} ({len(cpu_list)} CPUs)")
+        self._run_root_helper_command(
+            {"op": "set_cpu_epp_governor", "cpus": cpu_list, "governor": governor},
+            f"{tag}: governor set to {governor}.",
+            f"{tag}: failed to set governor.",
+        )
+
+    def _on_ccd_epp_changed(self, ccd_idx: int, tag: str, epp: str):
+        """Same as _on_ccd_governor_changed, for energy_performance_preference."""
+        cpu_list = self._ccd_cpu_lists[ccd_idx][1] if ccd_idx < len(self._ccd_cpu_lists) else []
+        if not cpu_list:
+            return
+        self._log(f"⚙️ {tag} (CCD{ccd_idx}): setting EPP → {epp} ({len(cpu_list)} CPUs)")
+        self._run_root_helper_command(
+            {"op": "set_cpu_epp_governor", "cpus": cpu_list, "epp": epp},
+            f"{tag}: EPP set to {epp}.",
+            f"{tag}: failed to set EPP.",
+        )
 
     def _init_co_live_handles(self):
         """
