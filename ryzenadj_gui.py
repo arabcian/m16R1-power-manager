@@ -2013,7 +2013,12 @@ class RyzenAdjGUI(QMainWindow):
         if success:
             self._update_extra_tools_state()
             self._update_profile_buttons()
-            self._reset_gaming_settings()
+            # quiet=True: this reset is a side-effect of disabling G-MODE,
+            # not a user-initiated "Reset" action — only the single
+            # "✅ G-MODE disabled." line below should show on success.
+            # Any real failure while updating gmode.json/custom.json is
+            # still logged (quiet only suppresses the success chatter).
+            self._reset_gaming_settings(quiet=True)
             self._log("✅ G-MODE disabled.")
         else:
             self.gmode_combo.blockSignals(True)
@@ -2114,8 +2119,14 @@ class RyzenAdjGUI(QMainWindow):
         if self.extra_settings:
             self._update_scripts_with_extra(self.extra_settings)
 
-    def _save_extra_settings(self):
-        """Writes the current GUI values to the extra settings file and updates the scripts."""
+    def _save_extra_settings(self, quiet=False):
+        """Writes the current GUI values to the extra settings file and updates the scripts.
+
+        quiet=True: suppress this function's own "saved" log line and the
+        per-profile chatter from _update_scripts_with_extra — used when this
+        is a side-effect of another action that already logs its own single
+        summary line (e.g. disabling G-MODE). Failures are always logged.
+        """
         data = {
             "thp": {
                 "enabled": self.thp_enabled_combo.currentText(),
@@ -2135,14 +2146,23 @@ class RyzenAdjGUI(QMainWindow):
             self.extra_settings_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.extra_settings_path, "w") as f:
                 json.dump(data, f, indent=2)
-            self._update_scripts_with_extra(data)
-            # Leave a single, clear log line:
-            self._log("✅ Extra settings saved and profiles updated.")
+            self._update_scripts_with_extra(data, quiet=quiet)
+            if not quiet:
+                # Leave a single, clear log line:
+                self._log("✅ Extra settings saved and profiles updated.")
         except Exception as e:
             self._log(f"Extra settings kaydedilemedi: {e}")
 
-    def _update_scripts_with_extra(self, extra_data):
-        """Adds the extra settings into the gmode and custom JSON files and scripts."""
+    def _update_scripts_with_extra(self, extra_data, quiet=False):
+        """Adds the extra settings into the gmode and custom JSON files and scripts.
+
+        quiet=True: suppress the normal per-profile success chatter
+        ("Profile written: ...", "✔ ... updated with extra settings.") —
+        used when this is a side-effect of another action (e.g. disabling
+        G-MODE) that already has its own single, clear log line. Failures
+        are ALWAYS logged regardless of quiet, so a real problem is never
+        silently swallowed.
+        """
         for profile_name in ["gmode", "custom"]:
             try:
                 try:
@@ -2156,8 +2176,9 @@ class RyzenAdjGUI(QMainWindow):
                     self._run_root_helper_command(
                         {"op": "save_power_profile", "name": profile_name,
                          "content": json.dumps(cfg, indent=2)},
-                        f"{profile_name} profile updated with extra settings.",
+                        "" if quiet else f"{profile_name} profile updated with extra settings.",
                         f"{profile_name} could not be updated",
+                        quiet_success=quiet,
                     )
                     wrapper.write_shell_script(profile_name, cfg)
                     # Duplicate success logs were removed from here.
@@ -2220,8 +2241,16 @@ class RyzenAdjGUI(QMainWindow):
         # The combo is always active
         self.gmode_combo.setEnabled(True)
 
-    def _reset_gaming_settings(self):
-        """Resets the gaming settings (null), updates the scripts."""
+    def _reset_gaming_settings(self, quiet=False):
+        """Resets the gaming settings (null), updates the scripts.
+
+        quiet=True: suppress all the normal chatter from this reset (its own
+        final log line, plus everything _save_extra_settings/
+        _update_scripts_with_extra would otherwise log) — used when this
+        runs as a side-effect of disabling G-MODE, which already logs its
+        own single "✅ G-MODE disabled." line. Failures are always logged
+        regardless of quiet.
+        """
         # Set the gaming values inside extra_settings to None
         if "gaming" in self.extra_settings:
             for key in self.extra_settings["gaming"]:
@@ -2232,8 +2261,9 @@ class RyzenAdjGUI(QMainWindow):
         for widgets in self.gaming_widgets.values():
             widgets["checkbox"].setChecked(False)
         # Save extra_settings and update the scripts
-        self._save_extra_settings()
-        self._log("✅ Gaming settings reset in profiles and scripts.")
+        self._save_extra_settings(quiet=quiet)
+        if not quiet:
+            self._log("✅ Gaming settings reset in profiles and scripts.")
 
     def _do_apply_gaming(self):
         """Applies only the gaming optimizations and THP settings."""
@@ -2331,7 +2361,7 @@ class RyzenAdjGUI(QMainWindow):
             raise json.JSONDecodeError("empty output", "", 0)
         return json.loads(lines[-1])
 
-    def _run_root_helper_command(self, payload_dict, success_msg, fail_msg, callback=None):
+    def _run_root_helper_command(self, payload_dict, success_msg, fail_msg, callback=None, quiet_success=False):
         import threading
         # OPT: apply_gaming_and_pci / run_nvctgp / read_gaming_status go
         # through the small C helper (see helper-c/ryzenadj_helper.c);
@@ -2366,11 +2396,18 @@ class RyzenAdjGUI(QMainWindow):
                     try:
                         res = self._parse_root_helper_output(out)
                         if res.get("ok"):
-                            msg = res.get("message", "")
-                            if msg:
-                                for line in msg.strip().splitlines():
-                                    self.log_signal.emit(line)
-                            self.log_signal.emit(f"✔ {success_msg}")
+                            # quiet_success: skip the normal chatter (root_helper's
+                            # own message lines + the "✔ {success_msg}" line) —
+                            # used when a caller batches several of these calls
+                            # (e.g. updating both gmode.json and custom.json) and
+                            # wants one clean summary log instead of N noisy ones.
+                            # Failures below are never suppressed.
+                            if not quiet_success:
+                                msg = res.get("message", "")
+                                if msg:
+                                    for line in msg.strip().splitlines():
+                                        self.log_signal.emit(line)
+                                self.log_signal.emit(f"✔ {success_msg}")
                             if callback:
                                 return_val = "OK\n" if payload_dict.get("op") == "save_power_profile" else ""
                                 QTimer.singleShot(0, self, lambda: callback(return_val))
