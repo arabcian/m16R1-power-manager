@@ -48,15 +48,25 @@ LOCAL_SCRIPTS_DIR = _LOCAL_CACHE_BASE / "ryzenadj-gui" / "scripts"
 ROOT_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/root_helper.py"
 
 
-def _call_root_helper(payload: dict, timeout: int = 30):
+def _call_root_helper(payload: dict, timeout: int = 30, return_dict: bool = False):
     """GUI'nin _run_root_helper_command'ıyla aynı desen, ama Qt'siz/senkron:
     ryzenadj_wrapper.py hem GUI hem de CLI'dan (ve tray'den) kullanılabildiği
     için burada bloklayan, sade bir sürüm yeterli. root_helper.py'ye
     doğrudan (python3 değil) pkexec ile geçiliyor — bu, com.ryzenadj.gui.policy
     içindeki org.freedesktop.policykit.exec.path eşleşmesini tetikler ve
     Polkit auth cache'ini (auth_admin_keep_always) diğer çağrılarla paylaşır.
-    Döner: (ok: bool, message_or_error: str)
+
+    Döner:
+      return_dict=False (varsayılan): (ok: bool, message_or_error: str) —
+        eski çağıranlarla birebir uyumlu.
+      return_dict=True: (ok: bool, message_or_error: str, raw: dict | None) —
+        root_helper'ın tam JSON cevabını da isteyen çağıranlar için (örn.
+        restore_boot_defaults'un `restored` bayrağı — bkz. o fonksiyon).
+        raw, geçerli bir JSON cevabı ayrıştırılamadıysa None olur.
     """
+    def _ret(ok, msg, raw=None):
+        return (ok, msg, raw) if return_dict else (ok, msg)
+
     try:
         proc = subprocess.run(
             ["pkexec", ROOT_HELPER_PATH],
@@ -64,22 +74,22 @@ def _call_root_helper(payload: dict, timeout: int = 30):
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return False, "root_helper timed out"
+        return _ret(False, "root_helper timed out")
     except Exception as e:
-        return False, str(e)
+        return _ret(False, str(e))
 
     out = (proc.stdout or "").strip()
     lines = [l for l in out.splitlines() if l.strip()]
     if not lines:
-        return False, (proc.stderr or "").strip() or "root_helper produced no output"
+        return _ret(False, (proc.stderr or "").strip() or "root_helper produced no output")
     try:
         res = json.loads(lines[-1])
     except json.JSONDecodeError:
-        return False, "Invalid root_helper response"
+        return _ret(False, "Invalid root_helper response")
 
     if res.get("ok"):
-        return True, res.get("message", "")
-    return False, res.get("error", "Unknown error")
+        return _ret(True, res.get("message", ""), res)
+    return _ret(False, res.get("error", "Unknown error"), res)
 
 
 PROFILES = ["quiet", "cool", "balanced", "balanced-performance", "performance", "custom"]
@@ -166,16 +176,31 @@ def ensure_boot_defaults_captured() -> None:
         log(f"[BOOT-DEFAULTS] capture failed: {msg}")
 
 
-def restore_boot_defaults() -> None:
+def restore_boot_defaults() -> bool:
     """Sade bir profile (quiet/cool/balanced/balanced-performance)
     dönüldüğünde çağrılır. Bu önyükleme için bir anlık görüntü
     alınmamışsa (yani custom/gmode hiç kullanılmadıysa) no-op —
-    değerler zaten hâlâ boot-default durumda."""
-    ok, msg = _call_root_helper({"op": "restore_boot_defaults"}, timeout=10)
+    değerler zaten hâlâ boot-default durumda.
+
+    BUG FIX: önceden bu fonksiyon hiçbir şey döndürmüyordu (None) ve
+    çağıran (GUI'deki _apply_profile) bunu hesaba katmadan HER
+    quiet/cool/balanced/balanced-performance geçişinde kullanıcıya
+    "↩ Restored boot-time defaults..." log satırını gösteriyordu — g-mode/
+    custom o boot'ta hiç kullanılmamış, yani gerçekte geri yüklenecek
+    hiçbir şey olmasa bile. root_helper'ın op_restore_boot_defaults'u artık
+    açık bir `restored: bool` alanı döndürüyor (bkz. o fonksiyonun
+    docstring'i); bu fonksiyon da onu olduğu gibi yukarı taşıyor, böylece
+    GUI görünür mesajı yalnızca gerçekten bir restore olduğunda gösterebilir.
+
+    Dönüş: gerçekten bir boot-defaults snapshot'ı geri yüklendiyse True,
+    (snapshot hiç yoksa ya da çağrı başarısız olduysa) False.
+    """
+    ok, msg, raw = _call_root_helper({"op": "restore_boot_defaults"}, timeout=10, return_dict=True)
     if ok:
         log(f"[BOOT-DEFAULTS] {msg}")
     else:
         log(f"[BOOT-DEFAULTS] restore failed: {msg}")
+    return bool(ok and isinstance(raw, dict) and raw.get("restored"))
 
 C = {
     "reset": "\033[0m", "bold": "\033[1m", "red": "\033[91m",

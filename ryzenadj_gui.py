@@ -4740,10 +4740,19 @@ class RyzenAdjGUI(QMainWindow):
         if self._busy:
             return
 
-        # Write the extra settings into the scripts (use the most recently saved extra settings)
-        if name in ("gmode", "custom") and self.gmode_active:
-            self._update_scripts_with_extra(self.extra_settings)
-
+        # BUG FIX: this used to unconditionally call _update_scripts_with_extra()
+        # (which re-writes gmode.json/custom.json on disk via root_helper AND
+        # regenerates the local preview shell script) every single time the
+        # gmode/custom power-mode BUTTON was clicked, as long as the g-mode
+        # tuning layout was active — even if the user never touched the
+        # THP/gaming settings in the Extra Tools tab and never pressed Save.
+        # That's wrong: the on-disk gmode/custom profiles already have the
+        # last-saved `extra` block baked in (see _save_extra_settings, which
+        # is the only place that should trigger this rewrite). Re-applying a
+        # profile should just read what's already on disk and apply it —
+        # nothing here needs to be regenerated. The call is removed; Save in
+        # the Extra Tools tab remains the only trigger for updating the
+        # gmode/custom profile files.
         self._load_profile(name, apply=True)
 
         # NOTE: _active_profile and _update_profile_buttons are not called here,
@@ -5261,8 +5270,16 @@ class RyzenAdjGUI(QMainWindow):
                     QTimer.singleShot(0, self, on_success)
 
                     if name in wrapper.SIMPLE_PROFILES:
-                        wrapper.restore_boot_defaults()
-                        self._log("↩ Restored boot-time defaults for gaming/THP tunables.")
+                        # BUG FIX: restore_boot_defaults() artık gerçekten bir
+                        # şey geri yüklenip yüklenmediğini (bool) döndürüyor.
+                        # Önceden bu log satırı koşulsuz basılıyordu — yani
+                        # g-mode/custom bu boot'ta HİÇ kullanılmamış olsa bile
+                        # her sade profil geçişinde "Restored boot-time
+                        # defaults..." görünüyordu. Artık yalnızca gerçek bir
+                        # restore olduğunda gösteriliyor.
+                        did_restore = wrapper.restore_boot_defaults()
+                        if did_restore:
+                            self._log("↩ Restored boot-time defaults for gaming/THP tunables.")
 
                     # Bildirim popup'ı yalnızca tray ÇALIŞMIYORSA burada
                     # gösterilir. Tray çalışıyorsa write_active_profile()

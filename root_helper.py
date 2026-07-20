@@ -790,18 +790,32 @@ def op_capture_boot_defaults(params: dict) -> dict:
 def op_restore_boot_defaults(params: dict) -> dict:
     """quiet/cool/balanced/balanced-performance'a dönüldüğünde çağrılır.
     Bu önyükleme için bir anlık görüntü yoksa (custom/gmode hiç
-    kullanılmadıysa) no-op — değerler zaten hâlâ boot-default durumda."""
+    kullanılmadıysa) no-op — değerler zaten hâlâ boot-default durumda.
+
+    BUG FIX: bu op'un `ok` alanı hem gerçek bir restore yapıldığında hem
+    de yapılacak hiçbir şey olmadığında (snapshot yok) True dönüyordu;
+    çağıran taraf (GUI) bunu ayırt edemediği için "Restored boot-time
+    defaults..." log satırını HER sade profile geçişte gösteriyordu —
+    g-mode/custom hiç kullanılmamış, hiçbir şey aslında geri
+    yüklenmemiş olsa bile. Artık cevaba açık bir `restored: bool` alanı
+    ekleniyor; GUI/wrapper kullanıcıya görünür mesajı yalnızca bu True
+    olduğunda göstermeli.
+    """
     if not os.path.exists(BOOT_DEFAULTS_FILE):
-        return {"ok": True, "message": "No boot-defaults snapshot for this boot, nothing to restore."}
+        return {
+            "ok": True,
+            "restored": False,
+            "message": "No boot-defaults snapshot for this boot, nothing to restore.",
+        }
 
     try:
         with open(BOOT_DEFAULTS_FILE, "r") as f:
             snapshot = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        return {"ok": False, "error": f"Could not read boot defaults snapshot: {e}"}
+        return {"ok": False, "restored": False, "error": f"Could not read boot defaults snapshot: {e}"}
 
     if not isinstance(snapshot, dict):
-        return {"ok": False, "error": "Corrupt boot defaults snapshot"}
+        return {"ok": False, "restored": False, "error": "Corrupt boot defaults snapshot"}
 
     restored, failed = 0, []
     for key, entry in snapshot.items():
@@ -821,7 +835,7 @@ def op_restore_boot_defaults(params: dict) -> dict:
     message = f"Restored {restored}/{len(snapshot)} boot-default values."
     if failed:
         message += "\n" + "\n".join(failed[:10])
-    return {"ok": True, "message": message}
+    return {"ok": True, "restored": True, "message": message}
 
 
 def op_read_gpu_curve(params: dict) -> dict:
