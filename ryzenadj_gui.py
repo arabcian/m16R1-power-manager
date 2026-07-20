@@ -4946,15 +4946,29 @@ class RyzenAdjGUI(QMainWindow):
 
         json_str = json.dumps(data, indent=2)
 
-        # Create the files so the old file-deletion logic in the callback doesn't error out
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tf:
+        # Create the files so the old file-deletion logic in the callback doesn't error out.
+        # SECURITY: these are user-context (never root) and inert, but keep them in a
+        # private per-user dir with 0600 rather than world-readable predictable /tmp names —
+        # no reason to leak profile JSON to other local users or invite a symlink race.
+        _priv_tmp = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(),
+            f"ryzenadj-gui-{os.getuid()}",
+        )
+        os.makedirs(_priv_tmp, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(_priv_tmp, 0o700)
+        except OSError:
+            pass
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False,
+                                         dir=_priv_tmp) as tf:
             tf.write(json_str)
             tmp_path = tf.name
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tf:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False,
+                                         dir=_priv_tmp) as tf:
             tf.write("# Direct execution disabled for safety.")
             script_path = tf.name
-        os.chmod(script_path, 0o755)
+        os.chmod(script_path, 0o600)
 
         # K4: Artık ham bir dosya yolu göndermiyoruz. root_helper.py
         # yalnızca doğrulanmış bir profil `name`'i kabul ediyor ve hedef
@@ -5680,7 +5694,7 @@ class RyzenAdjGUI(QMainWindow):
             self._log("❌ Read operation failed.")
             return
         try:
-            json_path = os.path.join(tempfile.gettempdir(), 'nvcurve_read.json')
+            json_path = '/run/ryzenadj-gui/nvcurve_read.json'
             if not os.path.exists(json_path):
                 self._log("❌ Curve data file not found.")
                 return
@@ -5768,7 +5782,7 @@ class RyzenAdjGUI(QMainWindow):
             self._log("❌ Apply operation failed.")
             return
         try:
-            json_path = os.path.join(tempfile.gettempdir(), 'nvcurve_apply_result.json')
+            json_path = '/run/ryzenadj-gui/nvcurve_apply_result.json'
             if not os.path.exists(json_path):
                 self._log("❌ Apply result file not found.")
                 return
@@ -5813,7 +5827,7 @@ class RyzenAdjGUI(QMainWindow):
             self._log("❌ Reset operation failed.")
             return
         try:
-            json_path = os.path.join(tempfile.gettempdir(), 'nvcurve_reset_result.json')
+            json_path = '/run/ryzenadj-gui/nvcurve_reset_result.json'
             if not os.path.exists(json_path):
                 self._log("❌ Reset result file not found.")
                 return

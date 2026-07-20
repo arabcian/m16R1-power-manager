@@ -213,7 +213,13 @@ static char *sysctl_to_proc_path(const char *key) {
 /* Writes `value` to `path` (already resolved to an absolute filesystem
  * path). Returns 0 on success, -1 on failure (errno set). */
 static int write_tunable_file(const char *path, const char *value) {
-    int fd = open(path, O_WRONLY | O_TRUNC);
+    /* O_NOFOLLOW: every path we write here comes from the fixed
+     * GAMING_TUNABLES/THP_TUNABLES table (never the caller), and all of
+     * them are real sysfs/proc files, not symlinks — so if the final
+     * component is a symlink, something is wrong and we fail closed
+     * rather than following it. O_CLOEXEC so a fork/exec elsewhere can't
+     * inherit the descriptor. */
+    int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     size_t n = strlen(value);
     ssize_t w = write(fd, value, n);
@@ -226,7 +232,7 @@ static int write_tunable_file(const char *path, const char *value) {
 /* Reads a file into a fixed-size buffer, trims trailing whitespace.
  * Returns 0 on success (out filled, always NUL-terminated), -1 on error. */
 static int read_file_trimmed(const char *path, char *out, size_t out_sz) {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) return -1;
     ssize_t n = read(fd, out, out_sz - 1);
     int saved_errno = errno;

@@ -181,14 +181,23 @@ install -o root -g root -m 0700 "$SOURCE_DIR/root_helper.py" "$APP_DIR/root_help
 # read_gaming_status (bkz. helper-c/ryzenadj_helper.c). Kaynaktan derlenir;
 # NVCTGP_PATH derleme zamanında $SBIN_DIR ile hizalanır (Python tarafındaki
 # sed ile aynı amaç). root:root, 0700 — root_helper.py ile aynı güven modeli.
+# C binary'leri derle: ryzenadj-helper (fast-path) VE nvctgp (sertleştirilmiş
+# /dev/mem cTGP yazıcısı — bkz. helper-c/nvctgp.c başlığı). C nvctgp derlenirse
+# shell script yerine O KURULUR; derlenemezse shell script'e düşülür (aşağıda
+# nvctgp opsiyonel bileşen bölümünde).
+NVCTGP_C_BUILT=0
 if command -v gcc >/dev/null 2>&1 || command -v cc >/dev/null 2>&1; then
-    info "ryzenadj-helper (C fast-path) derleniyor..."
+    info "C yardımcıları derleniyor (ryzenadj-helper + nvctgp)..."
     make -C "$SOURCE_DIR/helper-c" clean >/dev/null
     make -C "$SOURCE_DIR/helper-c" NVCTGP_PATH="$SBIN_DIR/nvctgp"
     install -o root -g root -m 0700 "$SOURCE_DIR/helper-c/ryzenadj-helper" "$APP_DIR/ryzenadj-helper"
     ok "ryzenadj-helper derlendi ve kuruldu: $APP_DIR/ryzenadj-helper"
+    if [ -f "$SOURCE_DIR/helper-c/nvctgp" ]; then
+        NVCTGP_C_BUILT=1
+        ok "nvctgp (C, sertleştirilmiş) derlendi — shell script yerine bu kurulacak."
+    fi
 else
-    warn "gcc/cc bulunamadı — ryzenadj-helper (C fast-path) atlanıyor. Gaming ayarları ve GPU TGP, root_helper.py üzerinden (yavaş yol) çalışmaya devam edecek şekilde GUI'de bir fallback YOKTUR; bu binary olmadan bu üç işlem başarısız olur. gcc kurup kurulumu tekrar çalıştırın."
+    warn "gcc/cc bulunamadı — ryzenadj-helper (C fast-path) atlanıyor. Gaming ayarları ve GPU TGP, root_helper.py üzerinden (yavaş yol) çalışmaya devam edecek şekilde GUI'de bir fallback YOKTUR; bu binary olmadan bu üç işlem başarısız olur. gcc kurup kurulumu tekrar çalıştırın. nvctgp, C derlenemediği için shell script olarak kurulacak."
 fi
 
 # Hardcoded /usr/local/lib path'lerini kurulum diziniyle hizala (ebuild ile aynı sed).
@@ -357,7 +366,17 @@ if [ -d "$SOURCE_DIR/nvctgp" ]; then
     install -d -o root -g root -m 0755 "$SBIN_DIR"
 
     NVCTGP_OK=0
-    [ -f "$SOURCE_DIR/nvctgp/nvctgp" ]  && { install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgp"  "$SBIN_DIR/nvctgp";  NVCTGP_OK=1; }
+    # nvctgp: sertleştirilmiş C binary derlendiyse ONU kur (shell + inline
+    # python3 heredoc /dev/mem yazıcısının yerine geçer — bkz. helper-c/nvctgp.c).
+    # Derlenmediyse orijinal shell script'e düş; ikisi de aynı argv/çıktı
+    # sözleşmesine sahip olduğundan nvctgpd fark etmez.
+    if [ "${NVCTGP_C_BUILT:-0}" -eq 1 ] && [ -f "$SOURCE_DIR/helper-c/nvctgp" ]; then
+        install -o root -g root -m 0755 "$SOURCE_DIR/helper-c/nvctgp" "$SBIN_DIR/nvctgp"; NVCTGP_OK=1
+        ok "nvctgp (C, sertleştirilmiş) kuruldu: $SBIN_DIR/nvctgp"
+    elif [ -f "$SOURCE_DIR/nvctgp/nvctgp" ]; then
+        install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgp" "$SBIN_DIR/nvctgp"; NVCTGP_OK=1
+        warn "nvctgp shell script (yedek) kuruldu — C sürümü için gcc kurup tekrar çalıştırın."
+    fi
     [ -f "$SOURCE_DIR/nvctgp/nvctgpd" ] && { install -o root -g root -m 0755 "$SOURCE_DIR/nvctgp/nvctgpd" "$SBIN_DIR/nvctgpd"; }
 
     # OpenRC init script + conf.d (yalnızca OpenRC anlamlı; dosya varsa kurulur)

@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 import time
-import tempfile
 from pathlib import Path as _Path
 
 # Only ever add this process's own install directory to sys.path — never
@@ -56,8 +55,87 @@ VAR_SCRIPTS_DIR = "/var/lib/ryzenadj-gui/scripts"
 # gerektirmeden kendiliğinden sağlanıyor.
 BOOT_DEFAULTS_FILE = "/run/ryzenadj-gui/boot_defaults.json"
 
+# SECURITY (symlink/TOCTOU): the nvcurve read/apply/reset ops used to drop
+# their result JSON at predictable, world-writable-directory paths under
+# /tmp (tempfile.gettempdir() + "nvcurve_read.json" etc.) as ROOT. A local
+# attacker could pre-create a symlink there to redirect root's write to an
+# arbitrary file, or swap the file between root's write and the GUI's read
+# (TOCTOU). This is the same bug class already fixed elsewhere in this file
+# for the boot-defaults snapshot. These results are now written into a
+# root-owned, 0755 dir on tmpfs (/run) with O_NOFOLLOW|O_CREAT|O_EXCL-style
+# discipline via _atomic_write_run_json(); the GUI reads them from the same
+# fixed location. /run is tmpfs so this is also self-cleaning per boot.
+GPU_RESULT_DIR = "/run/ryzenadj-gui"
+GPU_READ_RESULT = "/run/ryzenadj-gui/nvcurve_read.json"
+GPU_APPLY_RESULT = "/run/ryzenadj-gui/nvcurve_apply_result.json"
+GPU_RESET_RESULT = "/run/ryzenadj-gui/nvcurve_reset_result.json"
+
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_PROFILE_BYTES = 256 * 1024  # 256 KB
+
+
+def _atomic_write_run_json(target_path: str, data) -> None:
+    """Write `data` as JSON to `target_path` (which MUST live directly under
+    GPU_RESULT_DIR) safely as root, then chmod 0644 so the unprivileged
+    GUI/tray can read it back.
+
+    Hardening vs. the old `open(<predictable /tmp path>, "w")`:
+      * the containing dir is created root-owned 0755 up front;
+      * we write to a fresh temp file in that same root-owned dir with
+        O_CREAT|O_EXCL|O_NOFOLLOW (so a pre-planted symlink or file can't
+        redirect or hijack the write), then atomically rename() over the
+        target. rename() within the same root-owned dir can't be raced by
+        an unprivileged user, so the reader never sees a half-written or
+        swapped file.
+    """
+    # Defense in depth: refuse anything not directly inside GPU_RESULT_DIR.
+    if os.path.dirname(os.path.abspath(target_path)) != os.path.abspath(GPU_RESULT_DIR):
+        raise ValueError("refusing to write result outside GPU_RESULT_DIR")
+
+    os.makedirs(GPU_RESULT_DIR, exist_ok=True, mode=0o755)
+    try:
+        os.chmod(GPU_RESULT_DIR, 0o755)
+    except OSError:
+        pass
+
+    tmp_path = target_path + ".tmp"
+    # O_EXCL|O_CREAT: the open fails if ANYTHING already exists at tmp_path
+    # (regular file, symlink, whatever) — so an attacker-planted file or
+    # symlink can neither be followed nor reused; we fail closed instead.
+    # O_NOFOLLOW is redundant with O_EXCL on the final component but kept
+    # for clarity/defence-in-depth. We deliberately do NOT pre-unlink:
+    # unlink-then-create reopens a race window; letting O_EXCL fail closed
+    # is strictly safer. GPU_RESULT_DIR is root-owned 0755, so a leftover
+    # .tmp can only have been left by a previous root run that crashed
+    # mid-write — handle that one benign case by unlinking only a file we
+    # can lstat as root-owned and non-symlink, then retrying once.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    try:
+        fd = os.open(tmp_path, flags, 0o644)
+    except FileExistsError:
+        # Only clean up a plain, root-owned regular file (our own stale
+        # temp). Anything else (symlink, or a file we don't own) is left
+        # untouched and the write fails — we never follow or clobber it.
+        st = os.lstat(tmp_path)  # lstat: never follows a symlink
+        import stat as _stat
+        if _stat.S_ISREG(st.st_mode) and st.st_uid == 0:
+            os.unlink(tmp_path)
+            fd = os.open(tmp_path, flags, 0o644)
+        else:
+            raise
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+    finally:
+        try:
+            os.chmod(tmp_path, 0o644)
+        except OSError:
+            pass
+    os.replace(tmp_path, target_path)
+    try:
+        os.chmod(target_path, 0o644)
+    except OSError:
+        pass
 
 # SECURITY: fixed, server-side table of the only sysctl/sysfs keys gaming
 # profile application and boot-defaults capture/restore are allowed to
@@ -762,8 +840,7 @@ def op_read_gpu_curve(params: dict) -> dict:
     if result.returncode == 0:
         try:
             data = json.loads(result.stdout)
-            with open(os.path.join(tempfile.gettempdir(), 'nvcurve_read.json'), "w") as f:
-                json.dump(data, f)
+            _atomic_write_run_json(GPU_READ_RESULT, data)
             return {"ok": True, "message": "Curve read successfully."}
         except Exception as e:
             return {"ok": False, "error": f"Failed to parse JSON: {e}"}
@@ -826,8 +903,7 @@ def op_apply_gpu_offsets(params: dict) -> dict:
     if result2.returncode == 0:
         try:
             data = json.loads(result2.stdout)
-            with open(os.path.join(tempfile.gettempdir(), 'nvcurve_apply_result.json'), "w") as f:
-                json.dump(data, f)
+            _atomic_write_run_json(GPU_APPLY_RESULT, data)
         except Exception:
             pass
 
@@ -872,8 +948,7 @@ def op_reset_gpu_curve(params: dict) -> dict:
     if result.returncode == 0:
         try:
             data = json.loads(result.stdout)
-            with open(os.path.join(tempfile.gettempdir(), 'nvcurve_reset_result.json'), "w") as f:
-                json.dump(data, f)
+            _atomic_write_run_json(GPU_RESET_RESULT, data)
         except Exception:
             pass
 
