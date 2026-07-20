@@ -1968,7 +1968,7 @@ class RyzenAdjGUI(QMainWindow):
             self._log("⚠️ An operation is already in progress, please wait.")
             return
         self.gmode_combo.setEnabled(False)
-        self._reload_alienware_wmi(force_gmode=True, callback=self._on_gmode_enabled)
+        self._reload_alienware_wmi(force_gmode=True, callback=self._on_gmode_enabled, quiet_success=True)
 
     def _disable_gmode(self):
         """G-MODE'u deaktif et."""
@@ -1978,7 +1978,7 @@ class RyzenAdjGUI(QMainWindow):
             self._log("⚠️ An operation is already in progress, please wait.")
             return
         self.gmode_combo.setEnabled(False)
-        self._reload_alienware_wmi(force_gmode=False, callback=self._on_gmode_disabled)
+        self._reload_alienware_wmi(force_gmode=False, callback=self._on_gmode_disabled, quiet_success=True)
 
     def _on_gmode_enabled(self, success):
         self.gmode_combo.setEnabled(True)
@@ -1993,11 +1993,18 @@ class RyzenAdjGUI(QMainWindow):
                     # PROFILES_DIR artık root sahipli (/etc/ryzenadj-gui/profiles);
                     # doğrudan open(...,"w") yerine root_helper'ın
                     # save_power_profile op'u üzerinden yazıyoruz.
+                    # quiet_success=True: bu, "G-MODE enabled" aksiyonunun bir
+                    # iç adımı — başarı durumunda yalnızca yukarıdaki tek log
+                    # satırı görünmeli. Gerçek bir hata olursa (yazım başarısız
+                    # olursa) _run_root_helper_command'ın hata dalları bunu her
+                    # zaman loglar; quiet_success yalnızca başarı gürültüsünü
+                    # bastırır, hataları değil.
                     self._run_root_helper_command(
                         {"op": "save_power_profile", "name": "gmode",
                          "content": json.dumps(perf_data, indent=2)},
                         "G-MODE profile created (base: performance).",
                         "G-MODE profile creation error",
+                        quiet_success=True,
                     )
             except Exception as e:
                 self._log(f"⚠️ G-MODE profile creation error: {e}")
@@ -2033,8 +2040,15 @@ class RyzenAdjGUI(QMainWindow):
     FAST_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/ryzenadj-helper"
     FAST_HELPER_OPS = {"apply_gaming_and_pci", "run_nvctgp", "read_gaming_status"}
 
-    def _reload_alienware_wmi(self, force_gmode, callback):
-        """Unloads and reloads the Alienware-WMI module."""
+    def _reload_alienware_wmi(self, force_gmode, callback, quiet_success=False):
+        """Unloads and reloads the Alienware-WMI module.
+
+        quiet_success=True: suppress the "reloaded successfully" chatter
+        (and root_helper's own output line) on success — used for the
+        G-MODE enable/disable flows, which already show their own single
+        "✅ G-MODE enabled/disabled." line. Failures are always logged
+        regardless of quiet_success.
+        """
         payload = json.dumps({"op": "reload_alienware_wmi", "force_gmode": bool(force_gmode)})
         env = os.environ.copy()
         for var in ['DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']:
@@ -2052,9 +2066,10 @@ class RyzenAdjGUI(QMainWindow):
             )
             out, err = self.gmode_process.communicate(payload, timeout=15)
             if self.gmode_process.returncode == 0:
-                self._log("✅ Alienware-WMI reloaded successfully.")
-                if out:
-                    self._log(out.strip())
+                if not quiet_success:
+                    self._log("✅ Alienware-WMI reloaded successfully.")
+                    if out:
+                        self._log(out.strip())
                 callback(True)
             else:
                 self._log(f"❌ Alienware-WMI reload failed (exit: {self.gmode_process.returncode})")
