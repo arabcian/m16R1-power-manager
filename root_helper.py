@@ -817,16 +817,28 @@ def op_restore_boot_defaults(params: dict) -> dict:
     if not isinstance(snapshot, dict):
         return {"ok": False, "restored": False, "error": "Corrupt boot defaults snapshot"}
 
+    # HARDENING: this used to read `path` and `type` back out of the
+    # snapshot file and write to whatever it found there. The snapshot is
+    # root-written and 0644 so it is not attacker-writable today, but it
+    # made the write TARGET data rather than code — one chmod bug or one
+    # future change to where the snapshot lives away from being an
+    # arbitrary-root-write primitive. The snapshot's own path/type fields
+    # are now ignored entirely: only the KEY is used, and the destination
+    # is looked up in the same fixed BOOT_DEFAULTS_TUNABLES table every
+    # other op in this file uses. (The C helper does the same — see
+    # op_restore_boot_defaults in helper-c/ryzenadj_helper.c.)
     restored, failed = 0, []
     for key, entry in snapshot.items():
         if not isinstance(entry, dict):
             continue
-        path = entry.get("path")
-        kind = entry.get("type")
         value = entry.get("value")
-        if not isinstance(path, str) or kind not in ("sysctl", "file") or value is None:
+        if value is None:
             continue
-        ok, err = _write_tunable(kind, path, value)
+        info = BOOT_DEFAULTS_TUNABLES.get(key)
+        if info is None:
+            failed.append(f"{key}: not a known tunable, skipped")
+            continue
+        ok, err = _write_tunable(info["type"], info["path"], value)
         if ok:
             restored += 1
         else:
@@ -1375,9 +1387,18 @@ def op_set_cpu_boost(params: dict) -> dict:
     return {"ok": True, "message": f"CPU boost {'enabled' if enabled else 'disabled'}."}
 
 
+# NOT: ryzenadj-helper (C fast-path, bkz. helper-c/ryzenadj_helper.c)
+# artık şu op'ları da karşılıyor: set_cpu_epp_governor, set_cpu_boost,
+# capture_boot_defaults, restore_boot_defaults, apply_cpu_isolation,
+# revert_cpu_isolation. Bunların Python karşılıkları bu dosyada BİLEREK
+# duruyor: install.sh derleyici yoksa C binary'sini atlıyor ve
+# ryzenadj_gui/_helper_for() bu durumda sessizce buraya düşüyor
+# (öncesinde hiç fallback yoktu, işlem anlaşılmaz bir hatayla
+# başarısız oluyordu).
+#
 # NOT: op_run_script_content, op_apply_gaming_and_pci, op_run_nvctgp ve
 # op_read_gaming_status buradan kaldırıldı. İlk üçü artık ryzenadj-helper
-# (C fast-path, bkz. helper-c/ryzenadj_helper.c) tarafından karşılanıyor;
+# tarafından karşılanıyor;
 # op_run_script_content'in de GUI'de gerçek bir çağıran kalmamıştı (K1
 # düzeltmesiyle zaten TOCTOU riskini azaltmıştı, ama "root olarak
 # rastgele Python kaynağı çalıştır" ile sonuçlanan bir op'un, hiç

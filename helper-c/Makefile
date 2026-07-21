@@ -1,8 +1,9 @@
 # ryzenadj-gui — C fast-path binaries.
 #
-#   ryzenadj-helper : narrow root_helper.py fast-path (apply_gaming_and_pci /
-#                     run_nvctgp / read_gaming_status). See ryzenadj_helper.c
-#                     for what it deliberately does NOT implement.
+#   ryzenadj-helper : root_helper.py fast-path (gaming/PCI tunables, nvctgp,
+#                     governor/EPP, boost, boot-defaults, cgroup CCX
+#                     isolation). See ryzenadj_helper.c for what it
+#                     deliberately does NOT implement.
 #   nvctgp          : hardened replacement for the nvctgp shell script — the
 #                     /dev/mem raw-write cTGP primitive. See nvctgp.c header
 #                     for why this one, above all, belongs in C.
@@ -11,8 +12,19 @@
 # full RELRO + BIND_NOW).
 
 CC      ?= gcc
-CFLAGS  ?= -Wall -Wextra -Wpedantic -std=c11 -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2
-LDFLAGS ?= -Wl,-z,relro,-z,now
+# Hardening notes:
+#   -D_FORTIFY_SOURCE=2 needs an optimising build to do anything; it is a
+#     no-op (and warns) at -O0, hence the explicit -O2.
+#   -fPIE/-pie: position-independent executable so ASLR applies to the
+#     binary's own text, not just the libraries. Cheap for a program that
+#     runs for milliseconds, and this one runs as root.
+#   -Wl,-z,noexecstack: never mark the stack executable.
+#   -Wformat -Wformat-security: catch a non-literal format string before
+#     it becomes a bug in a privileged process.
+CFLAGS  ?= -Wall -Wextra -Wpedantic -std=c11 -O2 \
+           -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+           -fPIE -Wformat -Wformat-security
+LDFLAGS ?= -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pie
 
 # Overridable at build time so install.sh can bake in the actual
 # nvctgp location (e.g. /usr/sbin/nvctgp) instead of the source

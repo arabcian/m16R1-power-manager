@@ -177,27 +177,46 @@ find "$APP_DIR/nvcurve" -type f -exec chmod 0644 {} \;
 # 0700 + root sahipliği olmadan bu güven modeli GEÇERSİZ olur.
 install -o root -g root -m 0700 "$SOURCE_DIR/root_helper.py" "$APP_DIR/root_helper.py"
 
-# ryzenadj-helper: C fast-path for apply_gaming_and_pci / run_nvctgp /
-# read_gaming_status (bkz. helper-c/ryzenadj_helper.c). Kaynaktan derlenir;
+# ryzenadj-helper: C fast-path. apply_gaming_and_pci / run_nvctgp /
+# read_gaming_status'a EK olarak artık set_cpu_epp_governor, set_cpu_boost,
+# capture_boot_defaults ve restore_boot_defaults da bu binary tarafından
+# karşılanıyor (bkz. helper-c/ryzenadj_helper.c). Kaynaktan derlenir;
 # NVCTGP_PATH derleme zamanında $SBIN_DIR ile hizalanır (Python tarafındaki
 # sed ile aynı amaç). root:root, 0700 — root_helper.py ile aynı güven modeli.
 # C binary'leri derle: ryzenadj-helper (fast-path) VE nvctgp (sertleştirilmiş
 # /dev/mem cTGP yazıcısı — bkz. helper-c/nvctgp.c başlığı). C nvctgp derlenirse
 # shell script yerine O KURULUR; derlenemezse shell script'e düşülür (aşağıda
 # nvctgp opsiyonel bileşen bölümünde).
+# GAMING_TUNABLES/THP_TUNABLES tablosu üç dosyada bilerek tekrarlanıyor
+# (gerekçe: tools/check_tunable_sync.py başlığı). Sapma sessizce "ayar
+# uygulanmadı"ya dönüştüğü için kurulumdan önce uyarı olarak kontrol
+# ediliyor — kurulumu ENGELLEMEZ, yalnızca uyarır.
+if [ -f "$SOURCE_DIR/tools/check_tunable_sync.py" ]; then
+    if ! python3 "$SOURCE_DIR/tools/check_tunable_sync.py" >/dev/null 2>&1; then
+        warn "Tunable tabloları senkron değil — ayrıntı için: python3 tools/check_tunable_sync.py"
+    fi
+fi
+
 NVCTGP_C_BUILT=0
 if command -v gcc >/dev/null 2>&1 || command -v cc >/dev/null 2>&1; then
     info "C yardımcıları derleniyor (ryzenadj-helper + nvctgp)..."
     make -C "$SOURCE_DIR/helper-c" clean >/dev/null
-    make -C "$SOURCE_DIR/helper-c" NVCTGP_PATH="$SBIN_DIR/nvctgp"
-    install -o root -g root -m 0700 "$SOURCE_DIR/helper-c/ryzenadj-helper" "$APP_DIR/ryzenadj-helper"
-    ok "ryzenadj-helper derlendi ve kuruldu: $APP_DIR/ryzenadj-helper"
+    # STABILITY: `make` hatası eskiden sessizce geçiliyor, ardından gelen
+    # install komutu var olmayan dosyayla patlıyordu. Derleme başarısız
+    # olursa açıkça uyarıp fallback yoluna düşüyoruz.
+    if make -C "$SOURCE_DIR/helper-c" NVCTGP_PATH="$SBIN_DIR/nvctgp" && \
+       [ -f "$SOURCE_DIR/helper-c/ryzenadj-helper" ]; then
+        install -o root -g root -m 0700 "$SOURCE_DIR/helper-c/ryzenadj-helper" "$APP_DIR/ryzenadj-helper"
+        ok "ryzenadj-helper derlendi ve kuruldu: $APP_DIR/ryzenadj-helper"
+    else
+        warn "ryzenadj-helper derlenemedi — C fast-path atlanıyor (aşağıdaki fallback notuna bakın)."
+    fi
     if [ -f "$SOURCE_DIR/helper-c/nvctgp" ]; then
         NVCTGP_C_BUILT=1
         ok "nvctgp (C, sertleştirilmiş) derlendi — shell script yerine bu kurulacak."
     fi
 else
-    warn "gcc/cc bulunamadı — ryzenadj-helper (C fast-path) atlanıyor. Gaming ayarları ve GPU TGP, root_helper.py üzerinden (yavaş yol) çalışmaya devam edecek şekilde GUI'de bir fallback YOKTUR; bu binary olmadan bu üç işlem başarısız olur. gcc kurup kurulumu tekrar çalıştırın. nvctgp, C derlenemediği için shell script olarak kurulacak."
+    warn "gcc/cc bulunamadı — ryzenadj-helper (C fast-path) atlanıyor. Governor/EPP, boost ve boot-defaults op'ları root_helper.py üzerinden (yavaş yol) ÇALIŞMAYA DEVAM EDER: GUI ve wrapper artık binary yoksa otomatik olarak oraya düşüyor. Ancak apply_gaming_and_pci / run_nvctgp / read_gaming_status'un Python karşılığı YOKTUR — gaming ayarları ve GPU TGP bu binary olmadan çalışmaz. gcc kurup kurulumu tekrar çalıştırın. nvctgp, C derlenemediği için shell script olarak kurulacak."
 fi
 
 # Hardcoded /usr/local/lib path'lerini kurulum diziniyle hizala (ebuild ile aynı sed).

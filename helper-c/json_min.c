@@ -11,6 +11,7 @@ typedef struct {
     const char *s;
     size_t pos;
     size_t len;
+    int depth;      /* HARDENING: current container nesting depth */
 } Parser;
 
 static void skip_ws(Parser *p) {
@@ -35,7 +36,10 @@ static JsonValue *json_new(JsonType type) {
 }
 
 static int fail(char **err, const char *msg) {
-    if (err) {
+    /* Only the FIRST failure message is kept: parse_value() unwinds
+     * through several frames on error and each used to strdup() over the
+     * previous pointer, leaking it. */
+    if (err && *err == NULL) {
         *err = strdup(msg);
     }
     return 0;
@@ -80,6 +84,14 @@ static char *parse_string_raw(Parser *p, char **err) {
                      * we can't represent as a single byte. */
                     if (p->pos + 4 >= p->len) { free(buf); fail(err, "bad \\u escape"); return NULL; }
                     char hex[5] = { p->s[p->pos+1], p->s[p->pos+2], p->s[p->pos+3], p->s[p->pos+4], 0 };
+                    /* Reject non-hex digits instead of letting strtol
+                     * silently parse a prefix (e.g. "\u00zz" used to
+                     * become 0x00 and slip a NUL into the string). */
+                    for (int i = 0; i < 4; i++) {
+                        if (!isxdigit((unsigned char)hex[i])) {
+                            free(buf); fail(err, "bad \\u escape"); return NULL;
+                        }
+                    }
                     long cp = strtol(hex, NULL, 16);
                     p->pos += 4;
                     out = (cp >= 0x20 && cp < 0x7f) ? (char)cp : '?';
@@ -106,6 +118,22 @@ static char *parse_string_raw(Parser *p, char **err) {
 
 static JsonValue *parse_value(Parser *p, char **err);
 
+/* Frees a partially-built member array on an error unwind. The old code
+ * did a bare free(items), leaking every key string and child value
+ * already parsed into it. */
+static void free_partial_members(JsonMember *items, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(items[i].key);
+        json_free(items[i].value);
+    }
+    free(items);
+}
+
+static void free_partial_items(JsonValue **items, size_t count) {
+    for (size_t i = 0; i < count; i++) json_free(items[i]);
+    free(items);
+}
+
 static JsonValue *parse_object(Parser *p, char **err) {
     JsonValue *v = json_new(JSON_OBJ);
     if (!v) { fail(err, "out of memory"); return NULL; }
@@ -125,20 +153,20 @@ static JsonValue *parse_object(Parser *p, char **err) {
 
     while (1) {
         skip_ws(p);
-        if (peek(p) != '"') { free(items); free(v); fail(err, "expected object key"); return NULL; }
+        if (peek(p) != '"') { free_partial_members(items, count); free(v); fail(err, "expected object key"); return NULL; }
         char *key = parse_string_raw(p, err);
-        if (!key) { free(items); free(v); return NULL; }
+        if (!key) { free_partial_members(items, count); free(v); return NULL; }
         skip_ws(p);
-        if (peek(p) != ':') { free(key); free(items); free(v); fail(err, "expected ':'"); return NULL; }
+        if (peek(p) != ':') { free(key); free_partial_members(items, count); free(v); fail(err, "expected ':'"); return NULL; }
         p->pos++;
         skip_ws(p);
         JsonValue *val = parse_value(p, err);
-        if (!val) { free(key); free(items); free(v); return NULL; }
+        if (!val) { free(key); free_partial_members(items, count); free(v); return NULL; }
 
         if (count == cap) {
             cap *= 2;
             JsonMember *ni = realloc(items, cap * sizeof(JsonMember));
-            if (!ni) { free(key); free(items); free(v); fail(err, "out of memory"); return NULL; }
+            if (!ni) { free(key); json_free(val); free_partial_members(items, count); free(v); fail(err, "out of memory"); return NULL; }
             items = ni;
         }
         items[count].key = key;
@@ -149,7 +177,7 @@ static JsonValue *parse_object(Parser *p, char **err) {
         char c = peek(p);
         if (c == ',') { p->pos++; continue; }
         if (c == '}') { p->pos++; break; }
-        free(items); free(v); fail(err, "expected ',' or '}'"); return NULL;
+        free_partial_members(items, count); free(v); fail(err, "expected ',' or '}'"); return NULL;
     }
     v->u.object.items = items;
     v->u.object.count = count;
@@ -176,11 +204,11 @@ static JsonValue *parse_array(Parser *p, char **err) {
     while (1) {
         skip_ws(p);
         JsonValue *val = parse_value(p, err);
-        if (!val) { free(items); free(v); return NULL; }
+        if (!val) { free_partial_items(items, count); free(v); return NULL; }
         if (count == cap) {
             cap *= 2;
             JsonValue **ni = realloc(items, cap * sizeof(JsonValue *));
-            if (!ni) { free(items); free(v); fail(err, "out of memory"); return NULL; }
+            if (!ni) { json_free(val); free_partial_items(items, count); free(v); fail(err, "out of memory"); return NULL; }
             items = ni;
         }
         items[count++] = val;
@@ -188,7 +216,7 @@ static JsonValue *parse_array(Parser *p, char **err) {
         char c = peek(p);
         if (c == ',') { p->pos++; continue; }
         if (c == ']') { p->pos++; break; }
-        free(items); free(v); fail(err, "expected ',' or ']'"); return NULL;
+        free_partial_items(items, count); free(v); fail(err, "expected ',' or ']'"); return NULL;
     }
     v->u.array.items = items;
     v->u.array.count = count;
@@ -198,8 +226,22 @@ static JsonValue *parse_array(Parser *p, char **err) {
 static JsonValue *parse_value(Parser *p, char **err) {
     skip_ws(p);
     char c = peek(p);
-    if (c == '{') return parse_object(p, err);
-    if (c == '[') return parse_array(p, err);
+
+    if (c == '{' || c == '[') {
+        /* HARDENING (stack overflow): bound recursion depth. See the
+         * JSON_MAX_DEPTH comment in json_min.h — without this, a payload
+         * of nested brackets small enough to pass MAX_STDIN_BYTES
+         * segfaults this binary while it is running as root. */
+        if (p->depth >= JSON_MAX_DEPTH) {
+            fail(err, "maximum nesting depth exceeded");
+            return NULL;
+        }
+        p->depth++;
+        JsonValue *v = (c == '{') ? parse_object(p, err) : parse_array(p, err);
+        p->depth--;
+        return v;
+    }
+
     if (c == '"') {
         char *s = parse_string_raw(p, err);
         if (!s) return NULL;
@@ -211,36 +253,49 @@ static JsonValue *parse_value(Parser *p, char **err) {
     if (c == 't' && p->pos + 4 <= p->len && strncmp(p->s + p->pos, "true", 4) == 0) {
         p->pos += 4;
         JsonValue *v = json_new(JSON_BOOL);
-        if (v) v->u.boolean = 1;
+        if (!v) { fail(err, "out of memory"); return NULL; }
+        v->u.boolean = 1;
         return v;
     }
     if (c == 'f' && p->pos + 5 <= p->len && strncmp(p->s + p->pos, "false", 5) == 0) {
         p->pos += 5;
         JsonValue *v = json_new(JSON_BOOL);
-        if (v) v->u.boolean = 0;
+        if (!v) { fail(err, "out of memory"); return NULL; }
+        v->u.boolean = 0;
         return v;
     }
     if (c == 'n' && p->pos + 4 <= p->len && strncmp(p->s + p->pos, "null", 4) == 0) {
         p->pos += 4;
-        return json_new(JSON_NULL);
+        JsonValue *v = json_new(JSON_NULL);
+        if (!v) fail(err, "out of memory");
+        return v;
     }
     if (c == '-' || isdigit((unsigned char)c)) {
         size_t start = p->pos;
         if (peek(p) == '-') p->pos++;
+        /* A bare '-' with no digits after it used to parse as the number
+         * 0 (strtod on "-"); require at least one integer digit. */
+        if (!isdigit((unsigned char)peek(p))) { fail(err, "malformed number"); return NULL; }
         while (isdigit((unsigned char)peek(p))) p->pos++;
-        if (peek(p) == '.') { p->pos++; while (isdigit((unsigned char)peek(p))) p->pos++; }
+        if (peek(p) == '.') {
+            p->pos++;
+            if (!isdigit((unsigned char)peek(p))) { fail(err, "malformed number"); return NULL; }
+            while (isdigit((unsigned char)peek(p))) p->pos++;
+        }
         if (peek(p) == 'e' || peek(p) == 'E') {
             p->pos++;
             if (peek(p) == '+' || peek(p) == '-') p->pos++;
+            if (!isdigit((unsigned char)peek(p))) { fail(err, "malformed number"); return NULL; }
             while (isdigit((unsigned char)peek(p))) p->pos++;
         }
         char numbuf[64];
         size_t nlen = p->pos - start;
-        if (nlen >= sizeof(numbuf)) nlen = sizeof(numbuf) - 1;
+        if (nlen >= sizeof(numbuf)) { fail(err, "number literal too long"); return NULL; }
         memcpy(numbuf, p->s + start, nlen);
         numbuf[nlen] = '\0';
         JsonValue *v = json_new(JSON_NUM);
-        if (v) v->u.number = strtod(numbuf, NULL);
+        if (!v) { fail(err, "out of memory"); return NULL; }
+        v->u.number = strtod(numbuf, NULL);
         return v;
     }
     fail(err, "unexpected character");
@@ -249,7 +304,7 @@ static JsonValue *parse_value(Parser *p, char **err) {
 
 JsonValue *json_parse(const char *text, char **err) {
     if (err) *err = NULL;
-    Parser p = { .s = text, .pos = 0, .len = strlen(text) };
+    Parser p = { .s = text, .pos = 0, .len = strlen(text), .depth = 0 };
     skip_ws(&p);
     JsonValue *v = parse_value(&p, err);
     if (!v) return NULL;
@@ -306,7 +361,14 @@ const char *json_get_str(const JsonValue *obj, const char *key, const char *def)
 long json_get_int(const JsonValue *obj, const char *key, long def) {
     const JsonValue *v = json_obj_get(obj, key);
     if (v && v->type == JSON_NUM) return (long)v->u.number;
-    if (v && v->type == JSON_STR) return strtol(v->u.string, NULL, 10);
+    if (v && v->type == JSON_STR) {
+        /* strtol with no validation used to turn "abc" into 0 and
+         * silently accept it as a watt value. Require a fully-numeric
+         * string or fall back to the caller's default. */
+        char *end = NULL;
+        long r = strtol(v->u.string, &end, 10);
+        if (end && *end == '\0' && end != v->u.string) return r;
+    }
     return def;
 }
 

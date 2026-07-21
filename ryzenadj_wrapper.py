@@ -47,6 +47,44 @@ LOCAL_SCRIPTS_DIR = _LOCAL_CACHE_BASE / "ryzenadj-gui" / "scripts"
 
 ROOT_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/root_helper.py"
 
+# OPT: the C fast-path binary (helper-c/ryzenadj_helper.c) answers the
+# subset of ops below. Must stay in sync with ryzenadj_gui.py's
+# FAST_HELPER_OPS. Every one of these also still exists in
+# root_helper.py, so _helper_for() falls back transparently when the
+# binary isn't installed (install.sh skips it when no compiler is
+# present) — previously that case just failed with a confusing error.
+FAST_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/ryzenadj-helper"
+FAST_HELPER_OPS = {
+    "apply_gaming_and_pci",
+    "run_nvctgp",
+    "read_gaming_status",
+    "set_cpu_epp_governor",
+    "set_cpu_boost",
+    "capture_boot_defaults",
+    "restore_boot_defaults",
+}
+# Subset that root_helper.py also still implements — see the matching
+# comment in ryzenadj_gui.py. The other three have no Python twin.
+FAST_HELPER_FALLBACK_OPS = {
+    "set_cpu_epp_governor",
+    "set_cpu_boost",
+    "capture_boot_defaults",
+    "restore_boot_defaults",
+}
+
+
+def _helper_for(op) -> str:
+    """Which privileged helper answers `op` — the C fast-path binary if
+    it's one of the ported ops AND the binary is installed, else the
+    Python root_helper. Both speak the same stdin-JSON/stdout-JSON
+    contract, so callers don't care which answered."""
+    if op in FAST_HELPER_OPS:
+        if os.path.exists(FAST_HELPER_PATH):
+            return FAST_HELPER_PATH
+        if op not in FAST_HELPER_FALLBACK_OPS:
+            return FAST_HELPER_PATH
+    return ROOT_HELPER_PATH
+
 
 def _call_root_helper(payload: dict, timeout: int = 30, return_dict: bool = False):
     """GUI'nin _run_root_helper_command'ıyla aynı desen, ama Qt'siz/senkron:
@@ -69,7 +107,7 @@ def _call_root_helper(payload: dict, timeout: int = 30, return_dict: bool = Fals
 
     try:
         proc = subprocess.run(
-            ["pkexec", ROOT_HELPER_PATH],
+            ["pkexec", _helper_for(payload.get("op"))],
             input=json.dumps(payload),
             capture_output=True, text=True, timeout=timeout,
         )
@@ -166,10 +204,12 @@ def ensure_boot_defaults_captured() -> None:
     anlık görüntü alınmadıysa, root_helper mevcut (henüz değiştirilmemiş)
     değerleri kaydeder. Zaten alınmışsa no-op (ucuz, güvenle her seferinde
     çağrılabilir)."""
-    ok, msg = _call_root_helper({
-        "op": "capture_boot_defaults",
-        "tunables": {k: {"path": v["path"], "type": v["type"]} for k, v in BOOT_DEFAULTS_TUNABLES.items()},
-    }, timeout=10)
+    # SECURITY: the `tunables` mapping that used to be sent here is gone.
+    # Both helpers now resolve path/type from their own fixed, server-side
+    # table and ignore anything the client sends — sending it anyway was
+    # dead weight that only kept the old arbitrary-root-read shape alive
+    # in the wire format.
+    ok, msg = _call_root_helper({"op": "capture_boot_defaults"}, timeout=10)
     if ok:
         log(f"[BOOT-DEFAULTS] {msg}")
     else:

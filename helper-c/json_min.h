@@ -49,6 +49,20 @@ struct JsonValue {
     } u;
 };
 
+/* HARDENING: maximum container nesting depth accepted by json_parse().
+ *
+ * The parser is recursive descent, soeach nested '[' / '{' consumes a C
+ * stack frame. Without a cap, an unprivileged caller could send a
+ * payload of ~130k nested '[' — which fits comfortably inside
+ * ryzenadj-helper's MAX_STDIN_BYTES (256 KB) — and blow the stack of a
+ * process running as ROOT under pkexec. Confirmed: the pre-fix parser
+ * segfaults (signal 11) on exactly that input. The real payloads this
+ * project sends are at most 2 levels deep ({"gaming": {...}}), so 32 is
+ * already an order of magnitude more headroom than anything legitimate
+ * needs, and the parser now fails closed with a normal JSON error
+ * instead of dying. */
+#define JSON_MAX_DEPTH 32
+
 /* Parses `text` (NUL-terminated). Returns NULL and sets *err (malloc'd,
  * caller frees) on failure. On success, caller owns the returned tree
  * and must call json_free() on it. */

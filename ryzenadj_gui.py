@@ -1678,7 +1678,10 @@ class RyzenAdjGUI(QMainWindow):
                     if var in os.environ:
                         env[var] = os.environ[var]
                 proc = subprocess.Popen(
-                    ["pkexec", self.FAST_HELPER_PATH],
+                    # Same fallback discipline as _run_root_helper_command:
+                    # if the C binary isn't installed, root_helper.py still
+                    # implements read_gaming_status.
+                    ["pkexec", self._helper_for("read_gaming_status")],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, env=env,
                 )
@@ -2038,7 +2041,53 @@ class RyzenAdjGUI(QMainWindow):
     # read_gaming_status — see helper-c/ryzenadj_helper.c. Everything
     # else keeps going through ROOT_HELPER_PATH.
     FAST_HELPER_PATH = "/usr/local/lib/ryzenadj-gui/ryzenadj-helper"
-    FAST_HELPER_OPS = {"apply_gaming_and_pci", "run_nvctgp", "read_gaming_status"}
+    # Ops answered by the C fast-path binary (helper-c/ryzenadj_helper.c).
+    FAST_HELPER_OPS = {
+        "apply_gaming_and_pci",
+        "run_nvctgp",
+        "read_gaming_status",
+        # Ported to C: pure sysfs writes at paths built from a bounded
+        # integer index, with fixed value whitelists.
+        "set_cpu_epp_governor",
+        "set_cpu_boost",
+        # Ported to C: fixed-table snapshot/restore under /run.
+        "capture_boot_defaults",
+        "restore_boot_defaults",
+    }
+    # Subset of the above that root_helper.py ALSO still implements, so a
+    # missing C binary is survivable. The other three (apply_gaming_and_pci,
+    # run_nvctgp, read_gaming_status) were deliberately deleted from
+    # root_helper.py when they moved to C and have no Python twin — for
+    # those the C binary is required, and _helper_for() says so plainly
+    # instead of routing to a helper that would answer "Unknown op".
+    FAST_HELPER_FALLBACK_OPS = {
+        "set_cpu_epp_governor",
+        "set_cpu_boost",
+        "capture_boot_defaults",
+        "restore_boot_defaults",
+    }
+
+    @classmethod
+    def _helper_for(cls, op):
+        """Chooses which privileged helper answers `op`.
+
+        STABILITY: install.sh skips building the C helper when no compiler
+        is present. Previously there was NO fallback at all, so every
+        affected operation failed with an opaque pkexec error. Ops that
+        still have a Python twin now degrade to root_helper.py silently;
+        os.path.exists on a local path is a sub-microsecond stat, and
+        doing it per call means a mid-session reinstall is picked up
+        without restarting the GUI.
+        """
+        if op in cls.FAST_HELPER_OPS:
+            if os.path.exists(cls.FAST_HELPER_PATH):
+                return cls.FAST_HELPER_PATH
+            if op not in cls.FAST_HELPER_FALLBACK_OPS:
+                # No Python twin. Return the C path anyway so the failure
+                # names the actually-missing file rather than surfacing as
+                # a confusing "Unknown or disallowed op" from root_helper.
+                return cls.FAST_HELPER_PATH
+        return cls.ROOT_HELPER_PATH
 
     def _reload_alienware_wmi(self, force_gmode, callback, quiet_success=False):
         """Unloads and reloads the Alienware-WMI module.
@@ -2346,7 +2395,7 @@ class RyzenAdjGUI(QMainWindow):
         FAST_HELPER_OPS subset, through the C fast-path binary) to
         trigger the Polkit cache (auth_admin_keep).
         """
-        helper_path = self.FAST_HELPER_PATH if payload_dict.get("op") in self.FAST_HELPER_OPS else self.ROOT_HELPER_PATH
+        helper_path = self._helper_for(payload_dict.get("op"))
         try:
             payload = json.dumps(payload_dict)
             process = subprocess.Popen(
@@ -2381,7 +2430,7 @@ class RyzenAdjGUI(QMainWindow):
         # OPT: apply_gaming_and_pci / run_nvctgp / read_gaming_status go
         # through the small C helper (see helper-c/ryzenadj_helper.c);
         # everything else keeps going through root_helper.py.
-        helper_path = self.FAST_HELPER_PATH if payload_dict.get("op") in self.FAST_HELPER_OPS else self.ROOT_HELPER_PATH
+        helper_path = self._helper_for(payload_dict.get("op"))
 
         def worker():
             proc = None   # D2: pre-defined to avoid a NameError risk
