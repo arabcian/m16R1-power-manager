@@ -12,19 +12,40 @@
 # full RELRO + BIND_NOW).
 
 CC      ?= gcc
-# Hardening notes:
-#   -D_FORTIFY_SOURCE=2 needs an optimising build to do anything; it is a
-#     no-op (and warns) at -O0, hence the explicit -O2.
-#   -fPIE/-pie: position-independent executable so ASLR applies to the
-#     binary's own text, not just the libraries. Cheap for a program that
-#     runs for milliseconds, and this one runs as root.
-#   -Wl,-z,noexecstack: never mark the stack executable.
-#   -Wformat -Wformat-security: catch a non-literal format string before
-#     it becomes a bug in a privileged process.
-CFLAGS  ?= -Wall -Wextra -Wpedantic -std=c11 -O2 \
-           -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
-           -fPIE -Wformat -Wformat-security
-LDFLAGS ?= -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pie
+# ── flags ─────────────────────────────────────────────────────────────
+# CFLAGS/LDFLAGS stay user-overridable (Gentoo's portage exports both from
+# make.conf, and in GNU make an ENVIRONMENT variable beats a `?=`
+# assignment). That is exactly why the hardening flags are NOT in here:
+# with everything under `CFLAGS ?=`, a distro build with its own CFLAGS
+# silently dropped -fstack-protector-strong, -D_FORTIFY_SOURCE,
+# -fPIE and the whole LDFLAGS line — verified by building with
+# CFLAGS/LDFLAGS exported. For a binary that runs as root under pkexec
+# that is not an acceptable failure mode, so the hardening set below is
+# appended separately and cannot be overridden by accident.
+CFLAGS  ?= -O2
+LDFLAGS ?=
+
+# Mandatory hardening — always appended AFTER $(CFLAGS)/$(LDFLAGS):
+#   -fstack-protector-strong  stack canaries on anything with a local buffer
+#   -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2
+#                             fortified str/mem/printf wrappers. The -U
+#                             first avoids a redefinition warning on
+#                             distros (e.g. Gentoo hardened) that already
+#                             define it. Needs an optimising build to do
+#                             anything, hence the -O2 default above.
+#   -fPIE / -pie              position-independent executable so ASLR
+#                             covers the binary's own text, not just libs
+#   -Wl,-z,relro,-z,now       full RELRO: GOT resolved and made read-only
+#                             at startup, so it can't be overwritten later
+#   -Wl,-z,noexecstack        never mark the stack executable
+#   -Wformat -Wformat-security
+#                             catch a non-literal format string before it
+#                             becomes a bug in a privileged process
+HARDEN_CFLAGS  = -Wall -Wextra -Wpedantic -std=c11 \
+                 -fstack-protector-strong \
+                 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 \
+                 -fPIE -Wformat -Wformat-security
+HARDEN_LDFLAGS = -Wl,-z,relro,-z,now -Wl,-z,noexecstack -pie
 
 # Overridable at build time so install.sh can bake in the actual
 # nvctgp location (e.g. /usr/sbin/nvctgp) instead of the source
@@ -47,10 +68,10 @@ SBIN_PREFIX ?= /usr/local/sbin
 all: $(HELPER_BIN) $(NVCTGP_BIN)
 
 $(HELPER_BIN): $(HELPER_SRCS) json_min.h
-	$(CC) $(CFLAGS) $(CPPFLAGS) -o $(HELPER_BIN) $(HELPER_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(HARDEN_CFLAGS) $(CPPFLAGS) -o $(HELPER_BIN) $(HELPER_SRCS) $(LDFLAGS) $(HARDEN_LDFLAGS)
 
 $(NVCTGP_BIN): $(NVCTGP_SRCS)
-	$(CC) $(CFLAGS) -o $(NVCTGP_BIN) $(NVCTGP_SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(HARDEN_CFLAGS) -o $(NVCTGP_BIN) $(NVCTGP_SRCS) $(LDFLAGS) $(HARDEN_LDFLAGS)
 
 # ryzenadj-helper: root:root 0700 (only root reads/executes — a local
 # user can't inspect it for 0-days or replace it and keep pkexec's trust).
