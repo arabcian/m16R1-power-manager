@@ -1030,7 +1030,8 @@ static void op_restore_boot_defaults(const JsonValue *params, OutBuf *ob) {
     char header[128];
     snprintf(header, sizeof(header), "Restored %d/%zu boot-default values.", restored, total);
 
-    ob_raw(ob, "{\"ok\":true,\"restored\":true,\"message\":");
+    ob_raw(ob, restored > 0 ? "{\"ok\":true,\"restored\":true,\"message\":"
+                            : "{\"ok\":true,\"restored\":false,\"message\":");
     if (failed > 0 && lg.buf[0]) {
         LogBuf out; lb_init(&out);
         lb_line(&out, header);

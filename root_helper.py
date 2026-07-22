@@ -854,7 +854,7 @@ def op_restore_boot_defaults(params: dict) -> dict:
     message = f"Restored {restored}/{len(snapshot)} boot-default values."
     if failed:
         message += "\n" + "\n".join(failed[:10])
-    return {"ok": True, "restored": True, "message": message}
+    return {"ok": True, "restored": restored > 0, "message": message}
 
 
 def op_read_gpu_curve(params: dict) -> dict:
