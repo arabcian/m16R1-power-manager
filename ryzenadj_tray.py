@@ -360,8 +360,19 @@ class RyzenTray:
     _RGB_PERKEY_PATH    = Path.home() / ".config/ryzenadj_gui/rgb_perkey.json"
     _ALIENFX_MAPPINGS   = Path.home() / ".local/share/alienfx/mappings.json"
 
+    # Runs once per real boot, not once per tray/GUI (re)launch: /run is
+    # tmpfs, so this marker resets automatically every reboot — same idiom
+    # as root_helper.py's BOOT_DEFAULTS_FILE ("bu dosya her önyüklemede
+    # otomatik olarak sıfırlanır"). Without this, every time a fresh tray
+    # process starts within the same boot (e.g. one spawned again each time
+    # the GUI is launched, if no long-lived tray survived the previous GUI
+    # session) re-sends the full per-key layout / manual profile command
+    # list over USB HID — real, avoidable load for data that's already on
+    # the keyboard controller from the last time.
+    _RGB_BOOT_APPLIED_MARKER = Path("/run/ryzenadj-gui/rgb_boot_applied.flag")
+
     def _apply_default_rgb(self):
-        """Boot sırasında aktif RGB kaynağını uygular.
+        """Boot sırasında aktif RGB kaynağını uygular (sadece bu boot için ilk kez).
 
         Öncelik sırası:
           1. rgb_perkey.json  →  active == True  →  per-key setone komutları
@@ -369,8 +380,29 @@ class RyzenTray:
 
         İki kaynak mutually exclusive'dir: GUI tarafında biri aktifleştirilince
         diğeri devre dışı bırakılır.
+
+        Bu fonksiyonun kendisi (dolayısıyla donanıma giden komutlar) bir
+        önyükleme içinde yalnızca bir kez çalışır — bkz. _RGB_BOOT_APPLIED_MARKER.
+        GUI'deki "Apply Full Layout" / "Apply Selected" gibi elle tetiklenen
+        butonlar bu kontrolden etkilenmez, her zaman çalışır; bu sadece
+        tray'in otomatik boot-uygulamasını sınırlar.
         """
         import json, re as _re
+        try:
+            if self._RGB_BOOT_APPLIED_MARKER.exists():
+                log("RGB auto-apply: already applied this boot, skipping")
+                return
+        except OSError:
+            pass  # can't even stat it — fall through and try to apply anyway
+
+        def _mark_applied_this_boot():
+            try:
+                self._RGB_BOOT_APPLIED_MARKER.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+                self._RGB_BOOT_APPLIED_MARKER.touch()
+            except OSError as e:
+                log(f"RGB auto-apply: could not write boot marker ({e}) — "
+                    "may re-apply on next tray/GUI (re)start this boot")
+
         try:
             cli = find_tool("alienfx_cli")
             if not cli:
@@ -382,6 +414,7 @@ class RyzenTray:
                 pk = json.loads(self._RGB_PERKEY_PATH.read_text(encoding="utf-8"))
                 if pk.get("active"):
                     log("RGB auto-apply: per-key layout is active — loading")
+                    _mark_applied_this_boot()
                     self._apply_perkey_rgb(pk, cli)
                     return
                 else:
@@ -402,6 +435,7 @@ class RyzenTray:
                 log(f"RGB auto-apply: profile '{default_name}' has no commands")
                 return
             log(f"RGB auto-apply: applying manual profile '{default_name}' ({len(commands)} commands)")
+            _mark_applied_this_boot()
             self._rgb_boot_queue = list(commands)
             self._rgb_boot_cli = cli
             self._rgb_boot_run_next()
