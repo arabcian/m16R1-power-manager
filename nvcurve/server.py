@@ -7,9 +7,11 @@ Requires root (NvAPI needs it).
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -53,6 +55,7 @@ from .profiles.native import (
     delete_profile,
     rename_profile,
 )
+from .profiles.apply import apply_profile
 from .hal.vfcurve import (
     read_clock_offsets,
     read_curve,
@@ -265,12 +268,113 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="nvcurve", version="0.5.0", lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: the production frontend is served from this same FastAPI app (see the
+# SPA route near the bottom of this file), so no cross-origin access is
+# needed and CORS stays OFF by default. A wildcard allow_origins=["*"] here
+# previously meant ANY web page open in the user's browser could call this
+# root-owned, GPU-writing API directly (a "drive-by localhost" attack — the
+# same class of bug that has hit other local dev-tool servers). The only
+# legitimate cross-origin case is local frontend development (`pnpm dev`
+# on its own port), gated behind NVCURVE_DEV_PORT so it's never on for a
+# normal install.
+_dev_port = os.environ.get("NVCURVE_DEV_PORT")
+if _dev_port:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[f"http://localhost:{_dev_port}", f"http://127.0.0.1:{_dev_port}"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# ── API token auth ────────────────────────────────────────────────────────────
+#
+# Closes the other half of the drive-by-localhost hole: even same-origin or
+# curl-from-localhost requests now need a token that only a local process
+# able to read a root-only file can obtain. This does not replace the CORS
+# fix above — a same-origin/no-CORS-needed request (e.g. from a HTML page
+# saved to disk and opened as file://, or a request that doesn't need a
+# preflight) could otherwise still reach the API purely by virtue of the
+# server listening on a known port.
+#
+# Token is regenerated every server start (a stale token from a previous run
+# is simply invalid) and written to a root-only-readable file that clients
+# (nvcurve CLI / client.py) read before making requests.
+_API_TOKEN = secrets.token_hex(32)
+_TOKEN_FILE = "/run/nvcurve.token"
+
+
+def _write_token_file() -> None:
+    try:
+        fd = os.open(_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, _API_TOKEN.encode())
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        log.warning(
+            "Could not write %s (%s) — API clients won't be able to "
+            "authenticate automatically.", _TOKEN_FILE, exc,
+        )
+
+
+_write_token_file()
+
+
+class _TokenAuthMiddleware:
+    """Raw ASGI middleware enforcing the API token on /api/* and /ws/* paths.
+
+    Deliberately NOT a FastAPI/Starlette Depends()-based check: this project
+    has ~25 REST routes plus WebSocket routes defined directly on `app`, and
+    a dependency would need to be threaded through every single one (easy to
+    miss on a future route). A path-prefix ASGI wrapper covers all current
+    and future /api/ and /ws/ routes uniformly, including WebSocket upgrades,
+    without touching route bodies. Static assets and the SPA shell (outside
+    /api and /ws) stay public — the browser needs to load the UI before it
+    can do anything with a token.
+    """
+
+    def __init__(self, asgi_app, token: str):
+        self._app = asgi_app
+        self._token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self._app(scope, receive, send)
+
+        path = scope.get("path", "")
+        if not (path.startswith("/api/") or path.startswith("/ws/")):
+            return await self._app(scope, receive, send)
+
+        provided = None
+        for k, v in scope.get("headers") or []:
+            if k == b"authorization" and v.startswith(b"Bearer "):
+                provided = v[len(b"Bearer "):].decode("utf-8", "ignore")
+                break
+        if provided is None:
+            # Browsers can't set custom headers during the WebSocket
+            # handshake — accept the token as a query parameter for ws/ paths.
+            qs = scope.get("query_string", b"").decode("utf-8", "ignore")
+            for part in qs.split("&"):
+                if part.startswith("token="):
+                    provided = part[len("token="):]
+                    break
+
+        if provided is None or not hmac.compare_digest(provided, self._token):
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 4401})
+            else:
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [(b"content-type", b"application/json")],
+                })
+                await send({
+                    "type": "http.response.body",
+                    "body": b'{"detail":"missing or invalid API token"}',
+                })
+            return
+
+        return await self._app(scope, receive, send)
 
 
 # ── Request models ────────────────────────────────────────────────────────────
@@ -570,7 +674,11 @@ async def _auto_apply_profile_with_retry(
     )
 
     for attempt in range(max_retries):
-        errs = await _apply_profile(name, gpu_index)
+        errs, warns = await _apply_profile(name, gpu_index)
+
+        if warns:
+            log.warning("Auto-load attempt %d/%d non-fatal warnings: %s",
+                        attempt + 1, max_retries, "; ".join(warns))
 
         if errs:
             log.warning("Auto-load attempt %d/%d had errors: %s",
@@ -605,87 +713,62 @@ async def _auto_apply_profile_with_retry(
     log.warning("Auto-load profile %r failed after %d attempts — giving up", name, max_retries)
 
 
-async def _apply_profile(name: str, gpu_index: int = 0) -> list[str]:
+async def _apply_profile(name: str, gpu_index: int = 0) -> tuple[list[str], list[str]]:
     """Load and apply a saved profile to hardware.
 
-    Returns a list of error strings. An empty list means success.
-    Raises FileNotFoundError if the profile file does not exist.
-    Sets g_state["active_profile"] on full success.
+    Thin async wrapper around profiles.apply.apply_profile() — the single
+    shared implementation also used by `nvcurve profile apply` (cli.py) and
+    daemon auto-load (profiles/apply.py:apply_with_retry). This function
+    only adds the server-specific bookkeeping: the write lock, WS broadcast,
+    and active-profile tracking. See apply_profile()'s docstring for the
+    critical-error/warning split.
+
+    Returns (critical_errors, warnings). Raises FileNotFoundError if the
+    profile file does not exist. Sets g_state["active_profile"] when there
+    are no critical errors (matching cli.py's "warnings don't fail the
+    apply" policy — previously this function's own copy of the apply logic
+    treated a mem-offset/power-limit failure as fully fatal, which meant the
+    exact same profile could report success via the CLI and HTTP 500 via
+    this REST endpoint for the same hardware condition).
     """
-    import os as _os
     g_state = _get_gpu_state(gpu_index)
-    gpu = g_state["gpu"]
     cfg: Config = _state["config"]
 
-    safe_name = "".join(c for c in name if c.isalnum() or c in " _-()").strip()
-    filepath = _os.path.join(cfg.profile_dir, f"{safe_name}.json")
-
-    # Let FileNotFoundError propagate so callers can map it to 404 or a warning.
-    profile = await _run(load_profile, filepath)
-
-    errs: list[str] = []
-
-    # Order matters: LACT's nvidia backend always sets locked clocks *before*
-    # the offset (and undoes them in reverse) — the lock is the outer layer,
-    # the offset applies on top of it. The other way round risks the lock
-    # call resetting/ignoring an offset that was already set.
-    if profile.mem_locked_max_mhz is not None:
-        min_mhz = profile.mem_locked_min_mhz if profile.mem_locked_min_mhz is not None else profile.mem_locked_max_mhz
-        ok, msg = await _run(set_mem_locked_clocks, min_mhz, profile.mem_locked_max_mhz, gpu_index)
-        if not ok:
-            errs.append(f"Mem locked clocks: {msg}")
-
-    # NOTE: was briefly routed through NvAPI's write_memory_offset. Combining
-    # an NVML lock with an NvAPI offset lets the offset silently blow past
-    # the lock's ceiling (confirmed empirically: lock=9600 + NvAPI offset
-    # +1000 measured 10000, not capped). Back to NVML's set_clock_offsets for
-    # both, so lock and offset are resolved by the same API.
-    if profile.mem_offset_mhz is not None:
-        ok, msg = await _run(set_clock_offsets, None, profile.mem_offset_mhz, gpu_index)
-        if not ok:
-            errs.append(f"Mem offset: {msg}")
-
-    if profile.power_limit_w is not None:
-        ok, msg = await _run(set_power_limit, profile.power_limit_w, gpu_index)
-        if not ok:
-            errs.append(f"Power limit: {msg}")
-
-    # Apply curve deltas (after mem offset which may have wiped them).
     async with g_state["write_lock"]:
-        if profile.curve_deltas:
-            deltas = {int(k): v for k, v in profile.curve_deltas.items()}
-            errors = validate_write(deltas, cfg.max_delta_khz)
-            if errors:
-                errs.append("Curve: " + "; ".join(errors))
-            else:
-                if cfg.auto_snapshot:
-                    await _run(snapshot_save, gpu, g_state["gpu_name"], cfg.snapshot_dir, cfg.max_snapshots)
-                ret, desc = await _run(write_offsets, gpu, deltas)
-                if ret != 0:
-                    errs.append(f"Curve write failed ({ret}): {desc}")
-        else:
-            await _run(reset_offsets, gpu)
-
+        critical_errs, warnings = await _run(apply_profile, gpu_index, name, cfg)
         await _update_offsets_and_broadcast(gpu_index)
 
-    if not errs:
+    if not critical_errs:
         g_state["active_profile"] = name
-    return errs
+    return critical_errs, warnings
 
 
 @app.post("/api/profiles/{name}/apply")
 async def api_profile_apply(name: str, gpu_index: int = 0):
-    """Apply a saved profile to hardware (curve deltas + limits)."""
+    """Apply a saved profile to hardware (curve deltas + limits).
+
+    Only a curve-write failure is treated as a hard error (HTTP 500) — a
+    profile that writes its curve fine but hits a non-fatal problem with a
+    secondary setting (power limit, mem offset/lock — some driver/GPU
+    combinations reject these) still returns 200 with a "warnings" field.
+    This matches `nvcurve profile apply`'s policy; previously this endpoint
+    (via its own separate copy of the apply logic) treated any of those as
+    fatal, so the same profile on the same hardware could report success on
+    the CLI and HTTP 500 here.
+    """
     _require_gpu(gpu_index)
     try:
-        errs = await _apply_profile(name, gpu_index)
+        critical_errs, warnings = await _apply_profile(name, gpu_index)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Profile '{name}' not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load profile: {e}")
-    if errs:
-        raise HTTPException(status_code=500, detail="; ".join(errs))
-    return {"ok": True}
+    if critical_errs:
+        raise HTTPException(status_code=500, detail="; ".join(critical_errs))
+    result = {"ok": True}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @app.delete("/api/profiles/{name}")
@@ -769,10 +852,53 @@ async def api_limits(gpu_index: int = 0):
 
 @app.post("/api/limits")
 async def api_limits_update(req: LimitsRequest, gpu_index: int = 0):
-    """Update performance limits."""
+    """Update performance limits.
+
+    Validates against driver-reported ranges before touching hardware (a
+    clear 400 instead of relying entirely on however NVML happens to word
+    its own rejection — /api/curve/write's validate_write() does the
+    equivalent for curve deltas; this is the same idea for the other
+    NVML-mediated settings this endpoint controls).
+    """
     g_state = _get_gpu_state(gpu_index)
     gpu = g_state["gpu"]
     errs = []
+
+    if req.power_limit_w is not None:
+        power_info = await _run(get_power_limit, gpu_index)
+        min_w, max_w = power_info.get("min_power_limit_w"), power_info.get("max_power_limit_w")
+        if min_w is not None and max_w is not None and not (min_w <= req.power_limit_w <= max_w):
+            raise HTTPException(
+                status_code=400,
+                detail=f"power_limit_w {req.power_limit_w} is outside the driver's "
+                       f"reported range ({min_w}-{max_w} W)",
+            )
+
+    if req.mem_offset_mhz is not None:
+        mem_range = await _run(get_mem_offset_range, gpu_index)
+        min_off, max_off = mem_range.get("min_mem_offset_mhz"), mem_range.get("max_mem_offset_mhz")
+        if min_off is not None and max_off is not None and not (min_off <= req.mem_offset_mhz <= max_off):
+            raise HTTPException(
+                status_code=400,
+                detail=f"mem_offset_mhz {req.mem_offset_mhz} is outside the driver's "
+                       f"reported range ({min_off}-{max_off} MHz)",
+            )
+
+    if (
+        req.mem_locked_max_mhz is not None
+        and req.mem_locked_min_mhz is not None
+        and req.mem_locked_min_mhz > req.mem_locked_max_mhz
+    ):
+        # The driver snaps an out-of-range single value to its nearest
+        # supported clock rather than erroring (see hal/limits.py's
+        # get_current_mem_clock() docstring), so a full min/max bounds check
+        # here would just duplicate that silently-permissive behavior. An
+        # inverted min > max is unambiguously a caller mistake, though.
+        raise HTTPException(
+            status_code=400,
+            detail=f"mem_locked_min_mhz ({req.mem_locked_min_mhz}) is greater than "
+                   f"mem_locked_max_mhz ({req.mem_locked_max_mhz})",
+        )
 
     if req.power_limit_w is not None:
         ok, msg = await _run(set_power_limit, req.power_limit_w, gpu_index)
@@ -1254,6 +1380,18 @@ async def serve_spa(catchall: str):
         return FileResponse(index)
 
     raise HTTPException(status_code=404, detail="Not Found")
+
+
+# ── Wrap with token auth ───────────────────────────────────────────────────────
+#
+# All routes above are registered on the plain FastAPI instance `app`. Do the
+# ASGI wrap *after* every @app.get/post/websocket has run so route lookup
+# inside FastAPI itself is unaffected — this middleware only adds a check in
+# front of the calls that already reach `app`. Rebinding the module-level
+# name `app` here means both `uvicorn nvcurve.server:app` (import-time
+# lookup, happens after this line has executed) and run()/create_app() below
+# (name looked up at call time) see the secured version.
+app = _TokenAuthMiddleware(app, _API_TOKEN)
 
 
 # ── Factory for configured app ────────────────────────────────────────────────

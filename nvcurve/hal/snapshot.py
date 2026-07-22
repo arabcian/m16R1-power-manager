@@ -83,6 +83,15 @@ def restore(gpu, snapshot_dir: str, filepath: str = None) -> bool:
 
     If no filepath is given, uses the most recent snapshot in snapshot_dir.
     Returns True on success.
+
+    Security: when a caller-supplied filepath is used (e.g. from the REST
+    API's /api/snapshot/restore), it is required to resolve inside
+    snapshot_dir. Without this check, this function is a straight
+    "read any file the process can see and push its bytes to the GPU via
+    SetClockBoostTable" primitive that completely bypasses safety.validate_write
+    and its max_delta_khz limit — the size/version-word check below is not
+    sufficient on its own, since an attacker only needs to produce a buffer of
+    the right size and version word to have its contents accepted.
     """
     if filepath is None:
         if not os.path.isdir(snapshot_dir):
@@ -96,6 +105,17 @@ def restore(gpu, snapshot_dir: str, filepath: str = None) -> bool:
             print(f"No snapshot .bin files in {snapshot_dir}")
             return False
         filepath = os.path.join(snapshot_dir, bins[0])
+    else:
+        # Caller-supplied path — must stay inside snapshot_dir. Resolve both
+        # sides through realpath so symlinks can't be used to point outside
+        # the allowed directory either.
+        real_dir = os.path.realpath(snapshot_dir)
+        candidate = filepath if os.path.isabs(filepath) else os.path.join(snapshot_dir, filepath)
+        real_path = os.path.realpath(candidate)
+        if os.path.commonpath([real_dir, real_path]) != real_dir:
+            print(f"Refusing to restore from outside snapshot_dir: {filepath}")
+            return False
+        filepath = real_path
 
     if not os.path.isfile(filepath):
         print(f"Snapshot file not found: {filepath}")

@@ -2,39 +2,70 @@
 
 import ctypes
 import struct
-import sys
 
-from .errors import NVAPI_ERRORS
+from .errors import NVAPI_ERRORS, NvApiUnavailableError
 
 
 def load_nvapi() -> ctypes.CDLL:
-    """Load libnvidia-api.so from the NVIDIA driver."""
+    """Load libnvidia-api.so from the NVIDIA driver.
+
+    Raises NvApiUnavailableError if the library can't be found — callers
+    that want the previous print()+exit(1) CLI behaviour catch this at the
+    entry point (see cli.py:main()) rather than the process dying wherever
+    this happens to be imported from.
+    """
     for name in ("libnvidia-api.so", "libnvidia-api.so.1"):
         try:
             return ctypes.CDLL(name)
         except OSError:
             continue
-    print("Error: Cannot load libnvidia-api.so")
-    print("Ensure the NVIDIA proprietary driver is installed.")
-    sys.exit(1)
+    raise NvApiUnavailableError(
+        "Cannot load libnvidia-api.so — ensure the NVIDIA proprietary driver is installed."
+    )
 
 
-# Module-level library handle and QueryInterface function pointer.
-_nvapi = load_nvapi()
-_QI = _nvapi.nvapi_QueryInterface
-_QI.restype = ctypes.c_void_p
-_QI.argtypes = [ctypes.c_uint32]
+# Lazily-initialized library handle and QueryInterface function pointer.
+# Loading used to happen eagerly at module import time, which meant simply
+# importing this module (e.g. from a test, or `nvcurve --version` with no
+# driver present) crashed the whole process. Function pointers don't change
+# for the lifetime of the process once resolved, so a cache here also avoids
+# re-resolving the same fid on every single call (see nvcall()/nvcall_raw()
+# below and hal.monitoring.read_voltage(), which runs once per monitor poll).
+_nvapi: ctypes.CDLL | None = None
+_QI = None
+_fn_cache: dict[int, "ctypes._CFuncPtr"] = {}
+
+
+def _ensure_loaded() -> None:
+    global _nvapi, _QI
+    if _QI is not None:
+        return
+    _nvapi = load_nvapi()
+    qi = _nvapi.nvapi_QueryInterface
+    qi.restype = ctypes.c_void_p
+    qi.argtypes = [ctypes.c_uint32]
+    _QI = qi
 
 
 def query_interface(fid: int, nargs: int = 2):
     """Resolve an NvAPI function pointer by its 32-bit ID.
 
-    Returns a callable ctypes function, or None if the driver doesn't expose it.
+    Returns a callable ctypes function, or None if the driver doesn't expose
+    it. Raises NvApiUnavailableError if the driver library itself can't be
+    loaded. Resolved pointers are cached per (fid, nargs) since they're
+    constant for the process lifetime.
     """
+    _ensure_loaded()
+    key = (fid, nargs)
+    cached = _fn_cache.get(key)
+    if cached is not None:
+        return cached
     ptr = _QI(fid)
     if not ptr:
         return None
-    return ctypes.CFUNCTYPE(ctypes.c_int32, *[ctypes.c_void_p] * nargs)(ptr)
+    fn = ctypes.CFUNCTYPE(ctypes.c_int32, *[ctypes.c_void_p] * nargs)(ptr)
+    _fn_cache[key] = fn
+    return fn
 
 
 def nvcall(

@@ -47,6 +47,7 @@ from .nvapi.constants import (
     CT_SIZE, CT_BASE, CT_STRIDE,
     CT_POINTS,
 )
+from .nvapi.errors import NvApiUnavailableError, NoGpuFoundError, GpuIndexError
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -1085,79 +1086,14 @@ def cmd_profile(args):
             print("Error: profile name required for apply", file=sys.stderr)
             sys.exit(2)
         require_root()
-        import os as _os
-        from .hal.gpu import get_gpu
-        from .hal.limits import set_power_limit, set_mem_locked_clocks, set_clock_offsets
-        from .hal.vfcurve import write_offsets, reset_offsets
-        from .hal.snapshot import save as snapshot_save
-        from .profiles.native import load_profile
-        from .safety import validate_write
+        from .profiles.apply import apply_profile
 
         gpu_index = getattr(args, "gpu_index", 0)
-        gpu, gpu_name = get_gpu(index=gpu_index)
-
-        safe_name = "".join(c for c in args.name if c.isalnum() or c in " _-()").strip()
-        filepath = _os.path.join(default_config.profile_dir, f"{safe_name}.json")
         try:
-            profile = load_profile(filepath)
+            critical_errs, warnings = apply_profile(gpu_index, args.name, default_config)
         except FileNotFoundError:
             print(f"Profile '{args.name}' not found.", file=sys.stderr)
             sys.exit(1)
-
-        # DÜZELTME: mem-offset / power-limit gibi ikincil ayarlar bazı
-        # sürücü/GPU kombinasyonlarında izin hatası verebiliyor (ör. NVML
-        # mem-clock-offset domain'i bu GPU'da desteklenmiyor/kilitli).
-        # Bunlar "warning" (uyarı) olarak ele alınır; asıl istenen curve
-        # (V/F eğrisi) başarıyla yazıldığı sürece komut hâlâ başarı (exit 0)
-        # döner. Curve'ün kendisiyle ilgili hatalar hâlâ kritik kabul edilir.
-        warnings = []
-        critical_errs = []
-
-        # Order matters: LACT's nvidia backend always sets locked clocks
-        # *before* the offset (and undoes them in reverse) — the lock is the
-        # outer layer, the offset applies on top of it. Doing it the other
-        # way risks the lock call resetting/ignoring the offset already set.
-        if profile.mem_locked_max_mhz is not None:
-            min_mhz = profile.mem_locked_min_mhz
-            if min_mhz is None:
-                min_mhz = profile.mem_locked_max_mhz
-            ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
-            if not ok:
-                warnings.append(f"Mem locked clocks: {msg}")
-
-        # NOTE: was briefly routed through NvAPI's write_memory_offset (fixing
-        # a real bug where a GUI-level mechanism only touched 2 of the 6
-        # memory-domain points). But combining an NVML lock with an NvAPI
-        # offset lets the offset silently blow past the lock's ceiling (the
-        # two APIs don't know about each other) — confirmed empirically:
-        # lock=9600 + NvAPI offset=+1000 measured 10000, not capped at 9600.
-        # Back to NVML's set_clock_offsets for both, so lock and offset are
-        # resolved by the same API — this is what LACT's core/GPC domain
-        # relies on for its verified "same ceiling, different voltage" model;
-        # testing whether that holds for the memory domain too.
-        if profile.mem_offset_mhz is not None:
-            ok, msg = set_clock_offsets(None, profile.mem_offset_mhz, gpu_index)
-            if not ok:
-                warnings.append(f"Mem offset: {msg}")
-
-        if profile.power_limit_w is not None:
-            ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
-            if not ok:
-                warnings.append(f"Power limit: {msg}")
-
-        if profile.curve_deltas:
-            deltas = {int(k): v for k, v in profile.curve_deltas.items()}
-            errors = validate_write(deltas, default_config.max_delta_khz)
-            if errors:
-                critical_errs.append("Curve: " + "; ".join(errors))
-            else:
-                if default_config.auto_snapshot:
-                    snapshot_save(gpu, gpu_name, default_config.snapshot_dir, default_config.max_snapshots)
-                ret, desc = write_offsets(gpu, deltas)
-                if ret != 0:
-                    critical_errs.append(f"Curve write failed ({ret}): {desc}")
-        else:
-            reset_offsets(gpu)
 
         for w in warnings:
             print(f"  warning: {w}", file=sys.stderr)
@@ -1435,6 +1371,18 @@ def cmd_service(args):
 
         exec_start = f"{sys.executable} -m nvcurve daemon"
 
+        # Hardening notes (things deliberately left alone):
+        #   - No DevicePolicy=/PrivateDevices= — the daemon's spawned server
+        #     subprocess needs /dev/nvidia* access; PrivateDevices=yes in
+        #     particular would hide all devices including those and break
+        #     GPU access outright, so it's not used here.
+        #   - ProtectKernelModules=yes only blocks loading new kernel modules
+        #     (finit_module/init_module), not ioctls to an already-loaded
+        #     driver — safe given the Wants=/After=nvidia-persistenced.service
+        #     ordering already ensures the driver is loaded first.
+        #   - RestrictAddressFamilies allows AF_INET/AF_INET6 (the spawned
+        #     web server's HTTP/WS socket) alongside AF_UNIX (the daemon's
+        #     own control socket) — both processes share this unit's sandbox.
         unit = (
             "[Unit]\n"
             "Description=NVCurve NVIDIA GPU V/F Curve Daemon\n"
@@ -1447,6 +1395,16 @@ def cmd_service(args):
             "Restart=on-failure\n"
             "RestartSec=5\n"
             "Environment=PYTHONDONTWRITEBYTECODE=1\n"
+            "NoNewPrivileges=yes\n"
+            "ProtectHome=yes\n"
+            "PrivateTmp=yes\n"
+            "ProtectSystem=strict\n"
+            "ProtectKernelModules=yes\n"
+            "ProtectKernelTunables=yes\n"
+            "ProtectControlGroups=yes\n"
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
+            "ReadWritePaths=/etc/nvcurve /var/cache/nvcurve /var/log /run\n"
+            "UMask=0027\n"
             "\n"
             "[Install]\n"
             "WantedBy=multi-user.target\n"
@@ -1927,6 +1885,26 @@ def main():
     base_url = getattr(args, "server", None) or _discover_server_url(cfg)
     client = NvCurveClient(base=base_url, gpu_index=getattr(args, "gpu_index", 0))
 
+    # hal/gpu.py and nvapi/bootstrap.py used to call print()+sys.exit(1)
+    # directly on driver/enumeration failures. That's now raised as one of
+    # the exceptions below instead (so server.py/daemon.py/tests can catch
+    # it too), which means the CLI has to reproduce the old "clean message,
+    # exit 1" behaviour itself, once, here — rather than at each of the ~16
+    # call sites in _dispatch() that previously didn't need to care.
+    try:
+        _dispatch(args, cfg, client, base_url)
+    except NvApiUnavailableError as e:
+        print(f"nvcurve: {e}", file=sys.stderr)
+        sys.exit(1)
+    except NoGpuFoundError as e:
+        print(f"nvcurve: {e}", file=sys.stderr)
+        sys.exit(1)
+    except GpuIndexError as e:
+        print(f"nvcurve: {e}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _dispatch(args, cfg: Config, client: NvCurveClient, base_url: str) -> None:
     # Default — no subcommand: open the web UI.
     # If the server is already running, just open a browser tab (no root needed).
     # Otherwise start it. If we started it via the daemon (non-blocking), we

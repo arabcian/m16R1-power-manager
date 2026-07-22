@@ -2,6 +2,7 @@
 
 import ctypes
 import struct
+import threading
 from typing import Optional
 
 from ..nvapi.bootstrap import nvcall, nvcall_raw
@@ -18,7 +19,14 @@ from ..nvapi.types import VFPoint, CurveState
 # The boost mask is a static property of the GPU/driver — it does not change
 # at runtime. Cache it per GPU handle to avoid redundant GetClockBoostMask
 # calls on every HAL operation.
+#
+# server.py runs HAL calls via run_in_executor, so multiple threads can reach
+# this cache concurrently. A plain "check dict, then populate it" pattern is
+# a race — harmless in effect (worst case, two threads both miss the cache
+# and issue a redundant GetClockBoostMask call), but the lock closes it
+# outright for the cost of one uncontended acquire per call.
 _boost_mask_cache: dict[int, bytes] = {}
+_boost_mask_lock = threading.Lock()
 
 
 def get_boost_mask(gpu) -> tuple[Optional[bytes], str]:
@@ -29,8 +37,10 @@ def get_boost_mask(gpu) -> tuple[Optional[bytes], str]:
 
     Returns (mask_bytes, "OK") or (None, error).
     """
-    if gpu in _boost_mask_cache:
-        return _boost_mask_cache[gpu], "OK"
+    with _boost_mask_lock:
+        cached = _boost_mask_cache.get(gpu)
+    if cached is not None:
+        return cached, "OK"
 
     from ..nvapi.constants import MASK_SIZE
     def fill(b):
@@ -39,7 +49,8 @@ def get_boost_mask(gpu) -> tuple[Optional[bytes], str]:
     d, err = nvcall(FUNC["GetClockBoostMask"], gpu, MASK_SIZE, ver=1, pre_fill=fill)
     if d and len(d) >= 36:
         mask = d[4:36]
-        _boost_mask_cache[gpu] = mask
+        with _boost_mask_lock:
+            _boost_mask_cache[gpu] = mask
         return mask, "OK"
     return None, err
 
@@ -103,6 +114,23 @@ def read_clock_table_raw(gpu) -> tuple[Optional[bytes], str]:
     return nvcall(FUNC["GetClockBoostTable"], gpu, CT_SIZE, ver=1, pre_fill=fill)
 
 
+def _parse_ct_entries(d: bytes) -> list[tuple[int, int]]:
+    """Parse (delta_kHz, flags) tuples out of a raw ClockBoostTable buffer.
+
+    Pulled out of read_clock_table_parsed() so read_curve_with_raw_ct() below
+    can parse a buffer it already has without an extra read_clock_table_raw()
+    driver round-trip.
+    """
+    entries = []
+    max_entries = (len(d) - CT_BASE) // CT_STRIDE
+    for i in range(max_entries):
+        base_off = CT_BASE + i * CT_STRIDE
+        flags = struct.unpack_from("<I", d, base_off)[0]
+        delta = struct.unpack_from("<i", d, base_off + CT_DELTA_OFF)[0]
+        entries.append((delta, flags))
+    return entries
+
+
 def read_clock_table_parsed(gpu) -> tuple[Optional[list[tuple[int, int]]], str]:
     """Read per-point offsets and flags from the ClockBoostTable.
 
@@ -111,16 +139,7 @@ def read_clock_table_parsed(gpu) -> tuple[Optional[list[tuple[int, int]]], str]:
     d, err = read_clock_table_raw(gpu)
     if not d:
         return None, err
-
-    entries = []
-    max_entries = (len(d) - CT_BASE) // CT_STRIDE
-    for i in range(max_entries):
-        base_off = CT_BASE + i * CT_STRIDE
-        flags = struct.unpack_from("<I", d, base_off)[0]
-        delta = struct.unpack_from("<i", d, base_off + CT_DELTA_OFF)[0]
-        entries.append((delta, flags))
-
-    return entries, "OK"
+    return _parse_ct_entries(d), "OK"
 
 
 def read_clock_offsets(gpu) -> tuple[Optional[list[int]], str]:
@@ -190,12 +209,58 @@ def read_curve(gpu, gpu_name: str = "") -> tuple[Optional[CurveState], str]:
     return CurveState(points=points, timestamp=time.time(), gpu_name=gpu_name), "OK"
 
 
+def read_curve_with_raw_ct(gpu, gpu_name: str = "") -> tuple[Optional[CurveState], Optional[bytes], str]:
+    """Like read_curve(), but also returns the raw ClockBoostTable bytes it fetched.
+
+    write_global_offset()/write_memory_offset()/reset_offsets() below need
+    CurveState for domain classification (which points are "gpu" vs
+    "memory") but were then handing off to write_offsets() -> 
+    build_write_buffer(), which used to re-fetch the same ClockBoostTable a
+    second time via its own read_clock_table_raw() call. Passing the buffer
+    already fetched here straight into build_write_buffer()'s current_raw
+    parameter turns that into one driver round-trip instead of two.
+    """
+    vfp_points, vfp_err = read_vfp_curve(gpu)
+    if not vfp_points:
+        return None, None, vfp_err
+
+    ct_raw, ct_err = read_clock_table_raw(gpu)
+    if not ct_raw:
+        return None, None, ct_err
+    ct_entries = _parse_ct_entries(ct_raw)
+
+    points = []
+    in_memory = False
+    for i, (freq_khz, volt_uv) in enumerate(vfp_points):
+        if freq_khz == 0 and volt_uv == 0:
+            break  # end of populated entries
+
+        delta_khz = ct_entries[i][0] if i < len(ct_entries) else 0
+        flags = ct_entries[i][1] if i < len(ct_entries) else 0
+
+        if flags == 1:
+            in_memory = True
+
+        points.append(VFPoint(
+            index=i,
+            freq_khz=freq_khz,
+            volt_uv=volt_uv,
+            delta_khz=delta_khz,
+            domain="memory" if in_memory else "gpu",
+        ))
+
+    import time
+    state = CurveState(points=points, timestamp=time.time(), gpu_name=gpu_name)
+    return state, ct_raw, "OK"
+
+
 # ── Writers ───────────────────────────────────────────────────────────────────
 
 def build_write_buffer(
     gpu,
     point_deltas: dict[int, int],
     full_mask: bool = False,
+    current_raw: Optional[bytes] = None,
 ) -> tuple[Optional[ctypes.Array], str]:
     """Build a SetClockBoostTable buffer with specified per-point deltas.
 
@@ -207,12 +272,16 @@ def build_write_buffer(
         full_mask: if True, copy the complete GetClockBoostMask into the write
                    buffer instead of the default sparse (per-point) mask.
                    Older GPUs (e.g. Pascal) may require this.
+        current_raw: if the caller already fetched the current ClockBoostTable
+                   (e.g. via read_curve_with_raw_ct()), pass it here to skip
+                   this function's own read_clock_table_raw() call.
 
     Returns (mutable_buffer, "OK") or (None, error).
     """
-    current_raw, err = read_clock_table_raw(gpu)
-    if not current_raw:
-        return None, f"Cannot read current ClockBoostTable: {err}"
+    if current_raw is None:
+        current_raw, err = read_clock_table_raw(gpu)
+        if not current_raw:
+            return None, f"Cannot read current ClockBoostTable: {err}"
 
     buf = ctypes.create_string_buffer(CT_SIZE)
     ctypes.memmove(buf, current_raw, CT_SIZE)
@@ -245,6 +314,7 @@ def write_offsets(
     point_deltas: dict[int, int],
     dry_run: bool = False,
     full_mask: bool = False,
+    current_raw: Optional[bytes] = None,
 ) -> tuple[int, str]:
     """Write per-point frequency offsets via SetClockBoostTable.
 
@@ -253,10 +323,12 @@ def write_offsets(
         point_deltas: {point_index: delta_kHz} — only these points are written
         dry_run: if True, build the buffer but don't call the driver
         full_mask: if True, use the full GetClockBoostMask (for older GPUs)
+        current_raw: pre-fetched ClockBoostTable bytes, if the caller already
+                   has them — see build_write_buffer().
 
     Returns (return_code, description).
     """
-    buf, err = build_write_buffer(gpu, point_deltas, full_mask=full_mask)
+    buf, err = build_write_buffer(gpu, point_deltas, full_mask=full_mask, current_raw=current_raw)
     if buf is None:
         return -999, err
 
@@ -268,12 +340,12 @@ def write_offsets(
 
 def write_global_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int, str]:
     """Apply a uniform frequency offset to all GPU core points."""
-    curve, err = read_curve(gpu)
+    curve, ct_raw, err = read_curve_with_raw_ct(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
 
     point_deltas = {p.index: delta_khz for p in curve.points if p.domain == "gpu"}
-    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+    return write_offsets(gpu, point_deltas, dry_run=dry_run, current_raw=ct_raw)
 
 
 def write_memory_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int, str]:
@@ -291,33 +363,33 @@ def write_memory_offset(gpu, delta_khz: int, dry_run: bool = False) -> tuple[int
     fell back to a conservative pstate (P2) under load instead of reaching
     the intended clock. Always touch every memory-domain point found.
     """
-    curve, err = read_curve(gpu)
+    curve, ct_raw, err = read_curve_with_raw_ct(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
 
     point_deltas = {p.index: delta_khz for p in curve.points if p.domain == "memory"}
     if not point_deltas:
         return -999, "No memory-domain points found in curve"
-    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+    return write_offsets(gpu, point_deltas, dry_run=dry_run, current_raw=ct_raw)
 
 
 def reset_memory_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
     """Zero all memory-domain frequency offsets (see write_memory_offset)."""
-    curve, err = read_curve(gpu)
+    curve, ct_raw, err = read_curve_with_raw_ct(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
 
     point_deltas = {p.index: 0 for p in curve.points if p.domain == "memory"}
     if not point_deltas:
         return -999, "No memory-domain points found in curve"
-    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+    return write_offsets(gpu, point_deltas, dry_run=dry_run, current_raw=ct_raw)
 
 
 def reset_offsets(gpu, dry_run: bool = False) -> tuple[int, str]:
     """Zero all GPU core frequency offsets."""
-    curve, err = read_curve(gpu)
+    curve, ct_raw, err = read_curve_with_raw_ct(gpu)
     if not curve:
         return -999, f"Failed to read curve: {err}"
 
     point_deltas = {p.index: 0 for p in curve.points if p.domain == "gpu"}
-    return write_offsets(gpu, point_deltas, dry_run=dry_run)
+    return write_offsets(gpu, point_deltas, dry_run=dry_run, current_raw=ct_raw)

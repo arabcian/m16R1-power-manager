@@ -19,8 +19,24 @@ def _gpu_stable_key(info) -> str:
     return f"idx:{info.index}"
 
 
-def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
-    """Apply a named profile to the given GPU. Returns a list of error strings."""
+def apply_profile(gpu_index: int, name: str, cfg) -> tuple[list[str], list[str]]:
+    """Apply a named profile to the given GPU.
+
+    Returns (critical_errors, warnings):
+      - critical_errors: problems with the profile's curve deltas (the
+        actual V/F curve write). Non-empty means the profile did not apply.
+      - warnings: problems with secondary settings (power limit, memory
+        offset, memory-locked clocks) — some driver/GPU combinations reject
+        these (e.g. a memory-clock-offset domain that's locked/unsupported
+        on this GPU) even though the curve itself writes fine. These are
+        reported but don't fail the overall apply.
+
+    This is the single implementation of the profile-apply sequence — it
+    used to be duplicated (and had quietly drifted out of sync) across
+    cli.py's "profile apply" command and server.py's own _apply_profile;
+    both now call this function instead. If you're changing the apply
+    order/logic, this is the only place to do it.
+    """
     from .native import load_profile
     from ..hal.gpu import get_gpu
     from ..hal.limits import set_power_limit, set_mem_locked_clocks, set_clock_offsets
@@ -34,7 +50,8 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
     profile = load_profile(filepath)  # raises FileNotFoundError if missing
     gpu, gpu_name = get_gpu(index=gpu_index)
 
-    errs: list[str] = []
+    critical_errs: list[str] = []
+    warnings: list[str] = []
 
     # Order matters here: LACT's nvidia backend (a comparable NVML-based tool)
     # always sets locked clocks *before* the offset, and resets them in the
@@ -48,7 +65,7 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
             min_mhz = profile.mem_locked_max_mhz
         ok, msg = set_mem_locked_clocks(min_mhz, profile.mem_locked_max_mhz, gpu_index)
         if not ok:
-            errs.append(f"Mem locked clocks: {msg}")
+            warnings.append(f"Mem locked clocks: {msg}")
 
     # NOTE: was briefly routed through NvAPI's write_memory_offset. Combining
     # an NVML lock with an NvAPI offset lets the offset silently blow past
@@ -58,18 +75,18 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
     if profile.mem_offset_mhz is not None:
         ok, msg = set_clock_offsets(None, profile.mem_offset_mhz, gpu_index)
         if not ok:
-            errs.append(f"Mem offset: {msg}")
+            warnings.append(f"Mem offset: {msg}")
 
     if profile.power_limit_w is not None:
         ok, msg = set_power_limit(profile.power_limit_w, gpu_index)
         if not ok:
-            errs.append(f"Power limit: {msg}")
+            warnings.append(f"Power limit: {msg}")
 
     if profile.curve_deltas:
         deltas = {int(k): v for k, v in profile.curve_deltas.items()}
         errors = validate_write(deltas, cfg.max_delta_khz)
         if errors:
-            errs.append("Curve: " + "; ".join(errors))
+            critical_errs.append("Curve: " + "; ".join(errors))
         else:
             if cfg.auto_snapshot:
                 try:
@@ -78,11 +95,11 @@ def apply_profile(gpu_index: int, name: str, cfg) -> list[str]:
                     log.warning("Auto-snapshot failed: %s", exc)
             ret, desc = write_offsets(gpu, deltas)
             if ret != 0:
-                errs.append(f"Curve write failed ({ret}): {desc}")
+                critical_errs.append(f"Curve write failed ({ret}): {desc}")
     else:
         reset_offsets(gpu)
 
-    return errs
+    return critical_errs, warnings
 
 
 def apply_with_retry(gpu_index: int, name: str, cfg, max_retries: int = 3) -> bool:
@@ -107,10 +124,14 @@ def apply_with_retry(gpu_index: int, name: str, cfg, max_retries: int = 3) -> bo
 
     for attempt in range(max_retries):
         try:
-            errs = apply_profile(gpu_index, name, cfg)
+            errs, warns = apply_profile(gpu_index, name, cfg)
         except Exception as exc:
             log.warning("Auto-load attempt %d/%d exception: %s", attempt + 1, max_retries, exc)
-            errs = [str(exc)]
+            errs, warns = [str(exc)], []
+
+        if warns:
+            log.warning("Auto-load attempt %d/%d non-fatal warnings: %s",
+                        attempt + 1, max_retries, "; ".join(warns))
 
         if errs:
             log.warning("Auto-load attempt %d/%d errors: %s",

@@ -4,6 +4,7 @@ import httpx
 from typing import Any
 
 DEFAULT_BASE = "http://127.0.0.1:8042"
+_TOKEN_FILE = "/run/nvcurve.token"
 _TIMEOUT = 5.0
 
 
@@ -18,14 +19,35 @@ class ApiError(Exception):
         super().__init__(f"HTTP {status_code}: {detail}")
 
 
+def _read_api_token() -> str | None:
+    """Read the server's per-run API token (see server.py's _TokenAuthMiddleware).
+
+    Returns None if the token file is missing or unreadable (e.g. the server
+    isn't running yet, or this process doesn't have permission) — callers
+    then get a clear 401 ApiError from the server instead of a confusing
+    connection-level failure.
+    """
+    try:
+        with open(_TOKEN_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 class NvCurveClient:
-    def __init__(self, base: str = DEFAULT_BASE, gpu_index: int = 0):
+    def __init__(self, base: str = DEFAULT_BASE, gpu_index: int = 0, token: str | None = None):
         self._base = base.rstrip("/")
         self.gpu_index = gpu_index
+        self._token = token if token is not None else _read_api_token()
 
     def _url(self, path: str) -> str:
         sep = "&" if "?" in path else "?"
         return f"{self._base}{path}{sep}gpu_index={self.gpu_index}"
+
+    def _headers(self) -> dict:
+        if self._token:
+            return {"Authorization": f"Bearer {self._token}"}
+        return {}
 
     def _raise(self, r: httpx.Response) -> None:
         if r.is_error:
@@ -37,7 +59,7 @@ class NvCurveClient:
 
     def _get(self, path: str) -> Any:
         try:
-            r = httpx.get(self._url(path), timeout=_TIMEOUT)
+            r = httpx.get(self._url(path), headers=self._headers(), timeout=_TIMEOUT)
         except httpx.ConnectError:
             raise ServerNotRunning()
         self._raise(r)
@@ -45,7 +67,7 @@ class NvCurveClient:
 
     def _post(self, path: str, body: Any = None) -> Any:
         try:
-            r = httpx.post(self._url(path), json=body, timeout=_TIMEOUT)
+            r = httpx.post(self._url(path), json=body, headers=self._headers(), timeout=_TIMEOUT)
         except httpx.ConnectError:
             raise ServerNotRunning()
         self._raise(r)
@@ -53,7 +75,7 @@ class NvCurveClient:
 
     def _delete(self, path: str) -> Any:
         try:
-            r = httpx.delete(self._url(path), timeout=_TIMEOUT)
+            r = httpx.delete(self._url(path), headers=self._headers(), timeout=_TIMEOUT)
         except httpx.ConnectError:
             raise ServerNotRunning()
         self._raise(r)
@@ -129,10 +151,12 @@ class NvCurveClient:
         return self._post("/api/profiles", {"name": name})
 
     def profile_apply(self, name: str) -> dict:
-        return self._post(f"/api/profiles/{name}/apply")
+        from urllib.parse import quote
+        return self._post(f"/api/profiles/{quote(name, safe='')}/apply")
 
     def profile_delete(self, name: str) -> dict:
-        return self._delete(f"/api/profiles/{name}")
+        from urllib.parse import quote
+        return self._delete(f"/api/profiles/{quote(name, safe='')}")
 
     # ── Config ───────────────────────────────────────────────────────────────
 

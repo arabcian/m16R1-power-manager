@@ -15,10 +15,13 @@ Requires root.
 """
 
 import asyncio
+import grp
 import json
 import logging
 import os
 import signal
+import socket
+import struct
 import subprocess
 import sys
 
@@ -26,6 +29,24 @@ log = logging.getLogger("nvcurve.daemon")
 
 SOCKET_PATH = "/run/nvcurve-daemon.sock"
 _PERSISTENT_CONFIG_FILE = "/etc/nvcurve/config.json"
+_SOCKET_GROUP = "nvcurve"  # optional; if present, only root + this group can connect
+
+
+def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
+    """Return the UID of the process on the other end of a connected Unix socket.
+
+    Returns None if it can't be determined (should not normally happen for
+    AF_UNIX SOCK_STREAM on Linux, but callers must not assume a value).
+    """
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        _pid, uid, _gid = struct.unpack("3i", creds)
+        return uid
+    except (OSError, AttributeError, struct.error):
+        return None
 
 # Global server subprocess — only touched from the asyncio event loop.
 _server_proc: subprocess.Popen | None = None
@@ -99,9 +120,14 @@ async def _handle_client(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     resp: dict = {"ok": False, "error": "internal error"}
+    uid = _peer_uid(writer)
     try:
         data = await asyncio.wait_for(reader.readline(), timeout=5.0)
         req = json.loads(data)
+        # Audit trail: this socket is reachable by any member of _SOCKET_GROUP
+        # (see _serve_socket), not just root, and it fronts a root-owned
+        # daemon — log who asked for what so misuse is at least visible.
+        log.info("daemon request from uid=%s: %r", uid, req.get("cmd"))
         resp = await _dispatch(req)
     except asyncio.TimeoutError:
         resp = {"ok": False, "error": "timeout reading request"}
@@ -178,7 +204,24 @@ async def _serve_socket(auto_serve: bool = False) -> None:
         os.unlink(SOCKET_PATH)
 
     server = await asyncio.start_unix_server(_handle_client, path=SOCKET_PATH)
-    os.chmod(SOCKET_PATH, 0o666)  # allow non-root CLI to connect
+
+    # This socket fronts a root daemon that can spawn/kill a root subprocess
+    # on request — it should not be writable (or even connectable) by every
+    # local account. Restrict to owner + a dedicated group instead of the
+    # previous 0o666 (world). If the group doesn't exist yet, fall back to
+    # 0o660 (root-only, since the daemon itself runs as root) and tell the
+    # admin how to open it up for other trusted local users.
+    try:
+        gid = grp.getgrnam(_SOCKET_GROUP).gr_gid
+        os.chown(SOCKET_PATH, -1, gid)
+        log.info("Daemon socket restricted to root + group '%s'", _SOCKET_GROUP)
+    except KeyError:
+        log.warning(
+            "Group '%s' not found — daemon socket restricted to root only. "
+            "Run `groupadd %s` and add trusted users to it to allow non-root "
+            "CLI access.", _SOCKET_GROUP, _SOCKET_GROUP,
+        )
+    os.chmod(SOCKET_PATH, 0o660)
     log.info("Daemon listening on %s", SOCKET_PATH)
 
     if auto_serve:

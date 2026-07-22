@@ -1,29 +1,39 @@
 """GPU discovery and initialization."""
 
 import ctypes
-import sys
 
 from ..nvapi.bootstrap import query_interface
 from ..nvapi.constants import FUNC
+from ..nvapi.errors import NvApiUnavailableError, NoGpuFoundError, GpuIndexError
 from ..nvapi.types import GpuInfo
 
 
 def init_nvapi() -> None:
-    """Initialize NvAPI. Must be called before any GPU operations."""
+    """Initialize NvAPI. Must be called before any GPU operations.
+
+    Raises NvApiUnavailableError on failure — this used to print()+exit(1)
+    directly, which killed any process that called it (server.py, daemon.py,
+    a test) rather than letting that caller decide how to handle it. CLI
+    entry points that want the old behaviour catch this in main() instead.
+    """
     init_fn = query_interface(FUNC["Initialize"], nargs=0)
     if not init_fn or init_fn() != 0:
-        print("NvAPI_Initialize failed")
-        sys.exit(1)
+        raise NvApiUnavailableError("NvAPI_Initialize failed")
 
 
 def enumerate_gpus() -> tuple[ctypes.Array, int]:
-    """Return (gpu_handles_array, count). Exits if no GPUs found."""
+    """Return (gpu_handles_array, count).
+
+    Raises NvApiUnavailableError if the enumeration call itself fails, or
+    NoGpuFoundError if it succeeds but reports zero GPUs.
+    """
     gpus = (ctypes.c_void_p * 64)()
     ngpu = ctypes.c_int32()
-    query_interface(FUNC["EnumPhysicalGPUs"])(ctypes.byref(gpus), ctypes.byref(ngpu))
+    ret = query_interface(FUNC["EnumPhysicalGPUs"])(ctypes.byref(gpus), ctypes.byref(ngpu))
+    if ret != 0:
+        raise NvApiUnavailableError(f"EnumPhysicalGPUs failed (code {ret})")
     if ngpu.value == 0:
-        print("No NVIDIA GPUs found")
-        sys.exit(1)
+        raise NoGpuFoundError("No NVIDIA GPUs found")
     return gpus, ngpu.value
 
 
@@ -35,9 +45,20 @@ def get_gpu_name(gpu) -> str:
 
 
 def discover_gpus() -> list[GpuInfo]:
-    """Initialize NvAPI and NVML, and return a list of GpuInfo for all physical GPUs."""
+    """Initialize NvAPI and NVML, and return a list of GpuInfo for all physical GPUs.
+
+    Returns an empty list (rather than raising) when NvAPI initializes fine
+    but reports zero GPUs — this is the one case callers like server.py's
+    startup already treat as a soft "nothing found" condition rather than a
+    hard error. A genuinely unavailable driver (NvApiUnavailableError from
+    init_nvapi()/enumerate_gpus() itself failing) still propagates, since
+    that's a real environment problem, not "zero of N found".
+    """
     init_nvapi()
-    gpus, count = enumerate_gpus()
+    try:
+        gpus, count = enumerate_gpus()
+    except NoGpuFoundError:
+        return []
     infos = []
 
     try:
@@ -86,8 +107,7 @@ def get_gpu(index: int = 0):
     init_nvapi()
     gpus, count = enumerate_gpus()
     if index >= count:
-        print(f"GPU index {index} out of range (found {count} GPU(s))")
-        sys.exit(1)
+        raise GpuIndexError(f"GPU index {index} out of range (found {count} GPU(s))")
     gpu = gpus[index]
     name = get_gpu_name(gpu)
     return gpu, name

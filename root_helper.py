@@ -72,6 +72,13 @@ GPU_RESET_RESULT = "/run/ryzenadj-gui/nvcurve_reset_result.json"
 
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_PROFILE_BYTES = 256 * 1024  # 256 KB
+# main()'s sys.stdin.read() had no cap — a caller could send an arbitrarily
+# large payload and get read fully into memory before any op-specific size
+# check (MAX_PROFILE_BYTES etc.) even runs. Low severity since pkexec/polkit
+# already gates who can invoke this at all, but the same "bound it before
+# you parse it" discipline used everywhere else in this file (MAX_PROFILE_BYTES,
+# the C helper's MAX_STDIN_BYTES) was missing here specifically.
+MAX_STDIN_BYTES = 1024 * 1024  # 1 MB — generous headroom over MAX_PROFILE_BYTES
 
 
 def _atomic_write_run_json(target_path: str, data) -> None:
@@ -1443,7 +1450,10 @@ def main() -> int:
         print(json.dumps({"ok": False, "error": "root_helper must run as root"}))
         return 1
 
-    raw = sys.stdin.read()
+    raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+    if len(raw.encode()) > MAX_STDIN_BYTES:
+        print(json.dumps({"ok": False, "error": "stdin payload too large"}))
+        return 1
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
