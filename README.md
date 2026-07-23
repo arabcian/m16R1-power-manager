@@ -1,4 +1,4 @@
-Disclaimer: This software can damage your hardware if used carelessly use at your OWN RISK! Author has no intent to do that be CAREFUL!
+Disclaimer: This software can damage your hardware if used carelessly use at your OWN RISK! Author is not responsible for any errors or damages caused by this software
 
 # RyzenAdj GUI
 
